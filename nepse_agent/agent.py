@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+import urllib.parse
+import urllib.request
 from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -188,15 +190,81 @@ class NepseResearchAgent:
         model: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self.api_key = (api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")).strip()
-        if not self.api_key:
-            raise ResearchError("Set OPENAI_API_KEY before running the research agent.")
-        self.model = model or os.getenv("OPENAI_MODEL") or "gpt-5.5"
+        self.gemini_key = (os.getenv("GEMINI_API_KEY") or "").strip().strip('"')
+        self.openai_key = (api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")).strip()
+        
+        if not self.gemini_key and not self.openai_key:
+            raise ResearchError("Set GEMINI_API_KEY or OPENAI_API_KEY before running the research agent.")
+            
+        self.model = model or os.getenv("GEMINI_MODEL") or os.getenv("OPENAI_MODEL") or ("gemini-3.5-flash-lite" if self.gemini_key else "gpt-5.5")
         self.transport = transport
 
-    async def research(self, query: str) -> ResearchReport:
-        query = validate_query(query)
-        researched_at = datetime.now(ZoneInfo("Asia/Kathmandu")).isoformat(timespec="seconds")
+    def _fetch_company_metrics(self, symbol: str) -> tuple[dict[str, str], str]:
+        """Fetch real-time fundamental indicators from public Nepalese market listings."""
+        url = f"https://merolagani.com/CompanyDetail.aspx?symbol={symbol}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"})
+        try:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+        except Exception:
+            return {}, url
+
+        pairs = re.findall(r"<th[^>]*>(.*?)</th>\s*<td[^>]*>(.*?)</td>", html, re.DOTALL)
+        metrics: dict[str, str] = {}
+        for th, td in pairs:
+            cth = " ".join(re.sub(r"<[^>]+>", "", th).split())
+            ctd = " ".join(re.sub(r"<[^>]+>", "", td).split())
+            if cth and ctd:
+                metrics[cth] = ctd
+        return metrics, url
+
+    async def _research_gemini(self, query: str, researched_at: str) -> ResearchReport:
+        from google import genai
+
+        # Extract symbol from query (e.g. 'NABIL', 'Analyze SHIVM', etc.)
+        match = re.search(r"\b([A-Za-z]{2,10})\b", query)
+        symbol = match.group(1).upper() if match else query.strip().upper()
+
+        metrics, source_url = self._fetch_company_metrics(symbol)
+        source = Source(title=f"MeroLagani - {symbol} Profile", url=source_url)
+
+        context_lines = [f"{k}: {v}" for k, v in metrics.items()]
+        context_str = "\n".join(context_lines) if context_lines else f"Symbol {symbol} (Market metrics unavailable at time of fetch)"
+
+        prompt = (
+            f"{RESEARCH_INSTRUCTIONS}\n\n"
+            f"Research time: {researched_at} (Asia/Kathmandu)\n"
+            f"Target query: {query}\n"
+            f"Extracted Market & Financial Data:\n{context_str}\n\n"
+            f"Primary Sourced Reference URL: {source_url}\n"
+            "Generate the comprehensive Markdown research report according to instructions."
+        )
+
+        try:
+            client = genai.Client(api_key=self.gemini_key)
+            resp = client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+            )
+            report_text = resp.text
+        except Exception as exc:
+            raise ResearchError(f"Gemini generation error: {exc}") from exc
+
+        markdown = (
+            f"Researched at: {researched_at} (Asia/Kathmandu)\n\n"
+            f"{report_text}\n\n"
+            f"## Cited sources\n\n- [{source.title}]({source.url})\n"
+        )
+        return ResearchReport(
+            query=query,
+            researched_at=researched_at,
+            model=self.model,
+            markdown=markdown,
+            cited_sources=[source],
+            searched_urls=[source_url],
+        )
+
+    async def _research_openai(self, query: str, researched_at: str) -> ResearchReport:
         payload = {
             "model": self.model,
             "instructions": RESEARCH_INSTRUCTIONS + f"\nCurrent research time: {researched_at} (Asia/Kathmandu).",
@@ -211,7 +279,7 @@ class NepseResearchAgent:
             async with httpx.AsyncClient(timeout=180, transport=self.transport) as client:
                 response = await client.post(
                     "https://api.openai.com/v1/responses",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    headers={"Authorization": f"Bearer {self.openai_key}"},
                     json=payload,
                 )
                 response.raise_for_status()
@@ -233,3 +301,11 @@ class NepseResearchAgent:
         if not isinstance(data, dict):
             raise ResearchError("The provider returned an unexpected response format.")
         return parse_report(data, query, researched_at, self.model)
+
+    async def research(self, query: str) -> ResearchReport:
+        query = validate_query(query)
+        researched_at = datetime.now(ZoneInfo("Asia/Kathmandu")).isoformat(timespec="seconds")
+        if self.gemini_key and not self.transport:
+            return await self._research_gemini(query, researched_at)
+        return await self._research_openai(query, researched_at)
+
