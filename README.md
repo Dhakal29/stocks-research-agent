@@ -19,3 +19,21 @@ This repository contains exploration and implementations of the **Agent-to-Agent
    cd a2a-samples/samples/python/agents/helloworld
    python __main__.py
    ```
+
+## NEPSE Research Agent
+
+Research a NEPSE symbol for recent news, the latest available market information,
+company fundamentals and corporate actions, with dates and clickable sources.
+Run these commands from the repository root:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+export OPENAI_API_KEY='your-api-key'
+python -m nepse_agent research "NABIL"
+```
+
+To expose the researcher to other A2A agents, run `python -m nepse_agent serve`.
+Then query it from another terminal with `python -m nepse_agent ask "NABIL"`.
+See [the setup and architecture guide](nepse_agent/README.md) for configuration,
+report contents, data limitations and extension points.
