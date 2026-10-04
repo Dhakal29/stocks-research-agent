@@ -1,39 +1,164 @@
-# A2A Protocol Implementation & Samples
+# Agent-to-Agent (A2A) Protocol: NEPSE Research Agent
 
-This repository contains exploration and implementations of the **Agent-to-Agent (A2A) Protocol**, enabling autonomous AI agents to discover, communicate, and collaborate across standard protocols (JSON-RPC, REST, SSE, and gRPC).
+An implementation of the **Agent-to-Agent (A2A) Protocol (v1.0)** specializing in Nepal Stock Exchange (NEPSE) equity research, financial analysis, and live corporate insights.
+
+The repository includes:
+- **A2A Server**: Standard JSON-RPC (`SendMessage`) service exposing an `AgentCard` at `/.well-known/agent-card.json`.
+- **NEPSE Research Engine**: Real-time market data extraction (prices, P/E, EPS, Book Value, 52-week range, dividend history) powered by **Google Gemini** (`gemini-3.5-flash-lite`) or **OpenAI**.
+- **Interactive Chat UI**: Streamlit web chat with conversation history and automated server fallback.
+- **CLI Tools & Client**: Query agents directly, via CLI, or over the network.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────┐
+│     Streamlit Web Chat UI       │  (chat_ui.py)
+└──────────────┬──────────────────┘
+               │ (A2A JSON-RPC / SendMessage)
+               ▼
+┌─────────────────────────────────┐
+│      NEPSE Research Agent       │  (nepse_agent/server.py on port 10000)
+│   Discovery: /.well-known/      │
+└──────────────┬──────────────────┘
+               │
+        ┌──────┴───────────────────────┐
+        ▼                              ▼
+┌──────────────┐              ┌────────────────┐
+│ Live Market  │              │ Gemini / LLM   │
+│ Data Fetcher │              │ Synthesis      │
+└──────────────┘              └────────────────┘
+```
+
+---
 
 ## Features
-- **Agent Discovery**: Uses standardized `AgentCard` manifests for capabilities and skills.
-- **Inter-Agent Communication**: Streaming and non-streaming task execution.
-- **Multi-Agent Orchestration**: Host agents delegating work to specialized remote agents.
 
-## Getting Started
+- **Standard A2A Protocol**: Fully compliant `AgentCard` metadata, task state lifecycle (`TASK_STATE_WORKING` -> `TASK_STATE_COMPLETED`), and structured report artifacts.
+- **Real-Time Fundamental Metrics**: Fetches latest traded price, PE ratio, EPS, Book Value, market capitalization, 52-week range, and dividend track record.
+- **AI-Powered Financial Insights**: Synthesizes market observations and highlights sector risks.
+- **Multiple Interfaces**:
+  - Interactive Web Chat UI (Streamlit)
+  - HTTP JSON-RPC Server
+  - CLI Direct Research (`python -m nepse_agent research`)
+  - Inter-Agent Python Client (`nepse_agent.client.ask_agent`)
 
-1. Activate your virtual environment:
+---
+
+## Installation & Setup
+
+1. **Clone the repository**:
    ```bash
+   git clone <repo-url>
+   cd A2A_Protocol
+   ```
+
+2. **Create and activate a virtual environment**:
+   ```bash
+   python -m venv .venv
    source .venv/bin/activate
    ```
 
-2. Run the HelloWorld Agent sample:
+3. **Install dependencies**:
    ```bash
-   cd a2a-samples/samples/python/agents/helloworld
-   python __main__.py
+   pip install -r requirements.txt
    ```
 
-## NEPSE Research Agent
+4. **Configure API Keys**:
+   Create a `.env` file in the root directory:
+   ```bash
+   GEMINI_API_KEY="your-gemini-api-key"
+   # Optional: OPENAI_API_KEY="your-openai-api-key"
+   ```
 
-Research a NEPSE symbol for recent news, the latest available market information,
-company fundamentals and corporate actions, with dates and clickable sources.
-Run these commands from the repository root:
+---
 
+## Running the Project
+
+### Option 1: Interactive Chat UI (Streamlit)
+
+Launch the web chat interface:
 ```bash
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-export OPENAI_API_KEY='your-api-key'
-python -m nepse_agent research "NABIL"
+streamlit run chat_ui.py
+```
+Open `http://localhost:8501` in your browser. Enter any stock symbol (e.g., `NABIL`, `SHIVM`, `CHCL`, `EBL`) to receive a full research report.
+
+---
+
+### Option 2: Running as an A2A Server (For Multi-Agent Systems)
+
+Start the A2A server daemon:
+```bash
+python -m nepse_agent serve --port 10000
 ```
 
-To expose the researcher to other A2A agents, run `python -m nepse_agent serve`.
-Then query it from another terminal with `python -m nepse_agent ask "NABIL"`.
-See [the setup and architecture guide](nepse_agent/README.md) for configuration,
-report contents, data limitations and extension points.
+1. **Verify Discovery (`AgentCard`)**:
+   ```bash
+   curl http://127.0.0.1:10000/.well-known/agent-card.json
+   ```
+
+2. **Query from another terminal using the A2A Client**:
+   ```bash
+   python -m nepse_agent ask "NABIL" --url http://127.0.0.1:10000
+   ```
+
+3. **Or call via direct JSON-RPC**:
+   ```bash
+   curl -X POST http://127.0.0.1:10000/ \
+     -H "Content-Type: application/json" \
+     -H "A2A-Version: 1.0" \
+     -d '{
+       "jsonrpc": "2.0",
+       "id": "1",
+       "method": "SendMessage",
+       "params": {
+         "message": {
+           "role": "ROLE_USER",
+           "parts": [{"text": "SHIVM"}]
+         }
+       }
+     }'
+   ```
+
+---
+
+### Option 3: Quick Direct CLI Research
+
+Run research directly without starting an HTTP server:
+```bash
+python -m nepse_agent research "NABIL"
+```
+Or output raw JSON data:
+```bash
+python -m nepse_agent research "NABIL" --json
+```
+
+---
+
+## Running Automated Tests
+
+Run the test suite with pytest:
+```bash
+python -m pytest tests/test_nepse_agent.py
+```
+
+---
+
+## Project Structure
+
+```text
+.
+├── .env                       # API keys (git-ignored)
+├── requirements.txt           # Production dependencies
+├── chat_ui.py                 # Streamlit chat interface
+│
+├── nepse_agent/               # NEPSE A2A Agent package
+│   ├── agent.py               # Research logic, scraping & LLM synthesis
+│   ├── server.py              # A2A AgentCard & JSON-RPC server routes
+│   ├── client.py              # A2A client helper for inter-agent communication
+│   └── __main__.py            # CLI entry point (serve, research, ask)
+│
+└── tests/
+    └── test_nepse_agent.py    # Unit tests for A2A compliance & agent logic
+```

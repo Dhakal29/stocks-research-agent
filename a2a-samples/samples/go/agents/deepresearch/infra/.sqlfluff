@@ -1,3 +1,0 @@
-[sqlfluff]
-dialect = mysql
-exclude_rules = RF06, LT05
