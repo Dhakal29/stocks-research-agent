@@ -1,12 +1,11 @@
 """Search-backed research, independent of the A2A transport."""
 
+import asyncio
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
-import urllib.parse
-import urllib.request
 from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -79,6 +78,19 @@ Return a readable Markdown report with these sections:
 - Corporate actions: cash/bonus dividends, rights issues, AGM/book-close dates
   and mergers where verified. Distinguish proposed, approved and paid actions.
   A dividend percentage based on paid-up/face value is not a market-price yield.
+- Fundamental Health & Valuation Analysis (Benjamin Graham / Intelligent Investor & Financial Ratios):
+  Evaluate the company's financial strength and valuation using established value investing principles:
+  1. **Graham Number & Valuation Multiples**:
+     - Graham's rule of thumb: `P/E * P/B <= 22.5` (Conservative cutoff). Calculate this product explicitly.
+     - Graham Number formula: `sqrt(22.5 * EPS * Book Value)`. Compare this intrinsic value benchmark to the current market price (Margin of Safety check).
+  2. **Earnings Quality & Multiple**:
+     - Evaluate P/E against historical industry norms (NEPSE banking average is typically 15-22; non-financials 25-50). Is the company overpriced or undervalued?
+  3. **Financial Safety & Equity Cushion**:
+     - P/B vs Book Value: Is the stock trading at a high premium over its tangible book value?
+     - Dividend Yield & Consistency: Has the company provided stable cash/bonus dividends over recent fiscal years?
+  4. **Overall Fundamental Health Verdict**:
+     - Clearly state: **[FUNDAMENTALLY STRONG]**, **[MODERATE / FAIR]**, or **[FUNDAMENTALLY WEAK / HIGH SPECULATION]**.
+     - Provide a bulleted rationale citing: Profitability, Valuation buffer (Margin of Safety), and Risk flags (e.g., negative earnings, excessive multiples, lack of dividend stability).
 - Interpretation and gaps: explain the evidence and label your inferences.
   Include sector metrics when available: NPL, capital adequacy and distributable
   profit for banks; project capacity, generation status and debt for hydropower;
@@ -97,10 +109,15 @@ class ResearchError(RuntimeError):
     """A configuration, provider or evidence error safe to display to the user."""
 
 
+class EvidenceError(ResearchError):
+    """Search did not produce enough cited evidence; one further search may help."""
+
+
 @dataclass(frozen=True)
 class Source:
     title: str
     url: str
+    domain: str = ""
 
 
 @dataclass(frozen=True)
@@ -111,6 +128,9 @@ class ResearchReport:
     markdown: str
     cited_sources: list[Source]
     searched_urls: list[str]
+    source_domains: list[str] = field(default_factory=list)
+    search_queries: list[str] = field(default_factory=list)
+    search_suggestions_html: str = ""
 
 
 def validate_query(query: str) -> str:
@@ -142,6 +162,51 @@ def _source_link(source: Source) -> str:
     return f"[{title}]({source.url})"
 
 
+GOOGLE_REDIRECT_HOST = "vertexaisearch.cloud.google.com"
+
+
+def _publisher_domain(host: str) -> str:
+    """Group portal subdomains and NEPSE's two public hostnames together."""
+    host = host.lower().strip().strip(".")
+    if host == GOOGLE_REDIRECT_HOST:
+        return ""
+    labels = host.split(".")
+    if len(labels) < 2:
+        return ""
+    size = 3 if labels[-1] in {"np", "uk"} and labels[-2] in {"com", "org", "gov", "edu", "net", "co", "ac"} else 2
+    domain = ".".join(labels[-size:])
+    return "nepalstock.com" if domain == "nepalstock.com.np" else domain
+
+
+def _source_domain(url: str, title: str = "", domain: str = "") -> str:
+    host = urlsplit(url).hostname or ""
+    if host != GOOGLE_REDIRECT_HOST:
+        return _publisher_domain(host)
+    # Gemini often uses Google redirect links, with the publisher as the title.
+    value = domain or title.strip()
+    if re.fullmatch(r"(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}", value):
+        return _publisher_domain(value)
+    return ""
+
+
+def _build_report(
+    query: str, researched_at: str, model: str, texts: list[str], sources: dict[str, Source],
+    searched_urls: list[str], search_queries: list[str], suggestions_html: str = "",
+) -> ResearchReport:
+    domains = sorted({source.domain for source in sources.values() if source.domain})
+    links = "\n".join(f"- {_source_link(source)}" for source in sources.values())
+    coverage = f"Source coverage: {len(domains)} sites ({', '.join(domains) or 'publisher domains unavailable'})."
+    markdown = (
+        f"Researched at: {researched_at} (Asia/Kathmandu)\n\n"
+        + "\n\n".join(texts)
+        + f"\n\n## Cited sources\n\n{links}\n\n{coverage}\n"
+    )
+    return ResearchReport(
+        query, researched_at, model, markdown, list(sources.values()),
+        list(dict.fromkeys(searched_urls)), domains, list(dict.fromkeys(search_queries)), suggestions_html,
+    )
+
+
 def _render_citations(text: str, annotations: list[dict], sources: dict) -> str:
     """Turn API citation spans into ordinary Markdown links, retaining claims."""
     spans: dict[tuple[int, int], list[str]] = {}
@@ -151,7 +216,8 @@ def _render_citations(text: str, annotations: list[dict], sources: dict) -> str:
         url = _safe_url(annotation.get("url"))
         if not url:
             continue
-        source = Source(title=annotation.get("title") or url, url=url)
+        title = annotation.get("title") or url
+        source = Source(title=title, url=url, domain=_source_domain(url, title))
         sources.setdefault(url, source)
         start, end = annotation.get("start_index"), annotation.get("end_index")
         if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(text):
@@ -178,7 +244,7 @@ def parse_report(data: dict, query: str, researched_at: str, model: str) -> Rese
         raise ResearchError("The provider did not finish the report. Try a narrower query.")
     searches = [item for item in data.get("output", []) if item.get("type") == "web_search_call"]
     if not any(item.get("status") == "completed" for item in searches):
-        raise ResearchError("No completed web search was returned; current information is unverified.")
+        raise EvidenceError("No completed web search was returned; current information is unverified.")
 
     sources: dict[str, Source] = {}
     texts = []
@@ -188,7 +254,7 @@ def parse_report(data: dict, query: str, researched_at: str, model: str) -> Rese
                 if part.get("type") == "output_text" and part.get("text"):
                     texts.append(_render_citations(part["text"], part.get("annotations", []), sources))
     if not texts or not sources:
-        raise ResearchError("The search returned no cited report. Company information could not be verified.")
+        raise EvidenceError("The search returned no cited report. Company information could not be verified.")
 
     searched_urls = []
     for search in searches:
@@ -196,13 +262,67 @@ def parse_report(data: dict, query: str, researched_at: str, model: str) -> Rese
             url = _safe_url(source.get("url"))
             if url and url not in searched_urls:
                 searched_urls.append(url)
-    links = "\n".join(f"- {_source_link(source)}" for source in sources.values())
-    markdown = (
-        f"Researched at: {researched_at} (Asia/Kathmandu)\n\n"
-        + "\n\n".join(texts)
-        + f"\n\n## Cited sources\n\n{links}\n"
+    queries = []
+    for search in searches:
+        action = search.get("action", {})
+        queries.extend(action.get("queries") or ([action["query"]] if action.get("query") else []))
+    return _build_report(query, researched_at, model, texts, sources, searched_urls, queries)
+
+
+def parse_gemini_report(data: dict, query: str, researched_at: str, model: str) -> ResearchReport:
+    candidates = data.get("candidates") or []
+    if not candidates or candidates[0].get("finishReason") != "STOP":
+        raise ResearchError("Gemini did not finish the report. Try a narrower query.")
+    candidate = candidates[0]
+    metadata = candidate.get("groundingMetadata") or {}
+    chunks = metadata.get("groundingChunks") or []
+    queries = metadata.get("webSearchQueries") or []
+    if not queries or not chunks:
+        raise EvidenceError("Gemini returned no web search evidence. The Google Search tool must run.")
+
+    available: dict[int, Source] = {}
+    for index, chunk in enumerate(chunks):
+        web = chunk.get("web") or {}
+        url = _safe_url(web.get("uri"))
+        if url:
+            title = web.get("title") or url
+            available[index] = Source(title, url, _source_domain(url, title, web.get("domain") or ""))
+
+    cited: dict[str, Source] = {}
+    texts = []
+    for part_index, part in enumerate(candidate.get("content", {}).get("parts", [])):
+        text = part.get("text")
+        if not text or part.get("thought"):
+            continue
+        encoded = text.encode("utf-8")
+        insertions: dict[int, list[str]] = {}
+        for support in metadata.get("groundingSupports") or []:
+            segment = support.get("segment") or {}
+            if segment.get("partIndex", 0) != part_index:
+                continue
+            start, end = segment.get("startIndex", 0), segment.get("endIndex")
+            if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start < end <= len(encoded):
+                continue
+            try:
+                # Gemini offsets are bytes, so Nepali text needs UTF-8 conversion.
+                encoded[start:end].decode("utf-8")
+                position = len(encoded[:end].decode("utf-8"))
+            except UnicodeDecodeError:
+                continue
+            for index in support.get("groundingChunkIndices") or []:
+                source = available.get(index)
+                if source:
+                    cited.setdefault(source.url, source)
+                    insertions.setdefault(position, []).append(_source_link(source))
+        for position, links in sorted(insertions.items(), reverse=True):
+            text = text[:position] + " " + " ".join(dict.fromkeys(links)) + text[position:]
+        texts.append(text)
+    if not texts or not cited:
+        raise EvidenceError("Gemini returned no usable grounded citations for this report.")
+    return _build_report(
+        query, researched_at, model, texts, cited, [source.url for source in available.values()], queries,
+        (metadata.get("searchEntryPoint") or {}).get("renderedContent") or "",
     )
-    return ResearchReport(query, researched_at, model, markdown, list(sources.values()), searched_urls)
 
 
 class NepseResearchAgent:
@@ -230,6 +350,49 @@ class NepseResearchAgent:
         self.transport = transport
 
 
+    def _search_nepal_financial_web(self, symbol: str, query: str, max_results: int = 6) -> list[dict[str, str]]:
+        """Search the broader web across financial portals (ShareSansar, NepseAlpha, ArthaSarokar, etc.)."""
+        search_term = f"{symbol} stock news ShareSansar NepseAlpha Arthasarokar NEPSE"
+        url = "https://lite.duckduckgo.com/lite/"
+        data = urllib.parse.urlencode({"q": search_term}).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+        except Exception:
+            return []
+
+        snippets = [
+            re.sub(r"<[^>]+>", "", s).strip()
+            for s in re.findall(r"<td[^>]*class=[\'\"]result-snippet[\'\"]>(.*?)</td>", html, re.DOTALL)
+        ]
+        raw_links = re.findall(r"<a[^>]*href=[\'\"]([^\'\"]+)[\'\"][^>]*>(.*?)</a>", html)
+
+        results = []
+        seen = set()
+        for raw_url, text in raw_links:
+            if "uddg=" in raw_url:
+                parsed = urllib.parse.parse_qs(urllib.parse.urlparse(raw_url).query)
+                final_url = parsed.get("uddg", [raw_url])[0]
+            elif raw_url.startswith("http"):
+                final_url = raw_url
+            else:
+                continue
+
+            if final_url in seen or "duckduckgo" in final_url:
+                continue
+            seen.add(final_url)
+            clean_title = re.sub(r"<[^>]+>", "", text).strip()
+            snippet = snippets[len(results)] if len(results) < len(snippets) else ""
+            results.append({"title": clean_title or final_url, "url": final_url, "snippet": snippet})
+            if len(results) >= max_results:
+                break
+        return results
+
     def _fetch_company_metrics(self, symbol: str) -> tuple[dict[str, str], str]:
         """Fetch real-time fundamental indicators from public Nepalese market listings."""
         url = f"https://merolagani.com/CompanyDetail.aspx?symbol={symbol}"
@@ -251,48 +414,63 @@ class NepseResearchAgent:
 
     async def _research_gemini(self, query: str, researched_at: str) -> ResearchReport:
         from google import genai
+        from google.genai import types
 
-        # Extract symbol from query (e.g. 'NABIL', 'Analyze SHIVM', etc.)
-        match = re.search(r"\b([A-Za-z]{2,10})\b", query)
-        symbol = match.group(1).upper() if match else query.strip().upper()
+        sources_dict: dict[str, Source] = {}
 
-        metrics, source_url = self._fetch_company_metrics(symbol)
-        source = Source(title=f"MeroLagani - {symbol} Profile", url=source_url)
+        def search_internet_financial_portals(search_query: str) -> str:
+            """Search the web for NEPSE news, announcements, and articles across ShareSansar, NepseAlpha, ArthaSarokar, etc."""
+            results = self._search_nepal_financial_web(search_query, query, max_results=6)
+            for r in results:
+                sources_dict[r["url"]] = Source(title=r["title"], url=r["url"])
+            formatted = [f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['snippet']}" for r in results]
+            return "\n---\n".join(formatted) if formatted else "No web results found."
 
-        context_lines = [f"{k}: {v}" for k, v in metrics.items()]
-        context_str = "\n".join(context_lines) if context_lines else f"Symbol {symbol} (Market metrics unavailable at time of fetch)"
+        def fetch_live_nepse_fundamentals(symbol: str) -> str:
+            """Fetch latest stock market price, P/E, EPS, Book Value, and corporate dividend records."""
+            clean_sym = symbol.strip().upper()
+            metrics, source_url = self._fetch_company_metrics(clean_sym)
+            if source_url:
+                sources_dict[source_url] = Source(title=f"MeroLagani - {clean_sym} Profile", url=source_url)
+            lines = [f"{k}: {v}" for k, v in metrics.items()]
+            return "\n".join(lines) if lines else f"No metrics found for symbol {clean_sym}."
 
         prompt = (
             f"{RESEARCH_INSTRUCTIONS}\n\n"
             f"Research time: {researched_at} (Asia/Kathmandu)\n"
-            f"Target query: {query}\n"
-            f"Extracted Market & Financial Data:\n{context_str}\n\n"
-            f"Primary Sourced Reference URL: {source_url}\n"
-            "Generate the comprehensive Markdown research report according to instructions."
+            f"User query: {query}\n\n"
+            "INSTRUCTIONS:\n"
+            "1. Use `fetch_live_nepse_fundamentals` to inspect the company's real-time prices, earnings, and fundamentals.\n"
+            "2. Use `search_internet_financial_portals` to find live news, analysis, and reports across ShareSansar, NepseAlpha, and ArthaSarokar.\n"
+            "3. Synthesize the findings into the requested Markdown report with Graham valuation numbers and health verdict."
         )
 
         try:
             client = genai.Client(api_key=self.gemini_key)
-            resp = client.models.generate_content(
+            chat = client.chats.create(
                 model=self.model,
-                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[search_internet_financial_portals, fetch_live_nepse_fundamentals],
+                ),
             )
+            resp = chat.send_message(prompt)
             report_text = resp.text
         except Exception as exc:
             raise ResearchError(f"Gemini generation error: {exc}") from exc
 
+        sources_links = "\n".join(f"- [{s.title}]({s.url})" for s in sources_dict.values())
         markdown = (
             f"Researched at: {researched_at} (Asia/Kathmandu)\n\n"
             f"{report_text}\n\n"
-            f"## Cited sources\n\n- [{source.title}]({source.url})\n"
+            f"## Cited sources\n\n{sources_links}\n"
         )
         return ResearchReport(
             query=query,
             researched_at=researched_at,
             model=self.model,
             markdown=markdown,
-            cited_sources=[source],
-            searched_urls=[source_url],
+            cited_sources=list(sources_dict.values()),
+            searched_urls=list(sources_dict.keys()),
         )
 
     async def _research_openai(self, query: str, researched_at: str) -> ResearchReport:
@@ -339,4 +517,3 @@ class NepseResearchAgent:
         if self.gemini_key and not self.transport:
             return await self._research_gemini(query, researched_at)
         return await self._research_openai(query, researched_at)
-
