@@ -1,6 +1,8 @@
 import streamlit as st
 import asyncio
-from nepse_agent.client import ask_agent
+from dataclasses import asdict
+from streamlit.components.v1 import html
+from nepse_agent.client import AgentUnavailableError, ask_agent_report
 from nepse_agent.agent import NepseResearchAgent, ResearchError
 
 st.set_page_config(page_title="NEPSE Agent Chat", page_icon="📈", layout="centered")
@@ -15,6 +17,8 @@ if "messages" not in st.session_state:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        if msg.get("search_suggestions_html"):
+            html(msg["search_suggestions_html"], height=120, scrolling=True)
 
 # User prompt
 prompt = st.chat_input("Enter NEPSE symbol or question:")
@@ -27,13 +31,19 @@ if prompt:
         with st.spinner("Researching company data & news..."):
             try:
                 # Try calling via A2A Server first
-                response = asyncio.run(ask_agent(prompt, "http://127.0.0.1:10000"))
-            except Exception:
-                # If A2A server is not running, run directly with agent
-                st.info("ℹ️ Note: A2A server on port 10000 is offline; answering via direct agent mode.")
-                report = asyncio.run(NepseResearchAgent().research(prompt))
-                response = report.markdown
-
-            st.markdown(response)
-            st.session_state.messages.append({"role": "assistant", "content": response})
-    
+                try:
+                    report_data = asyncio.run(ask_agent_report(prompt, "http://127.0.0.1:10000"))
+                except AgentUnavailableError:
+                    st.info("The A2A server is unavailable; running research directly.")
+                    report_data = asdict(asyncio.run(NepseResearchAgent().research(prompt)))
+            except (ResearchError, ValueError) as exc:
+                st.error(str(exc))
+            else:
+                response = report_data["markdown"]
+                suggestions = report_data.get("search_suggestions_html", "")
+                st.markdown(response)
+                if suggestions:
+                    html(suggestions, height=120, scrolling=True)
+                st.session_state.messages.append({
+                    "role": "assistant", "content": response, "search_suggestions_html": suggestions,
+                })

@@ -331,152 +331,108 @@ class NepseResearchAgent:
         api_key: str | None = None,
         model: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        provider: str | None = None,
+        min_sites: int | None = None,
     ) -> None:
-        raw_openai = api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")
-        self.openai_key = raw_openai.strip()
-        raw_gemini = os.getenv("GEMINI_API_KEY", "")
-        self.gemini_key = raw_gemini.strip().strip('"')
-
-        # If user explicitly passed empty api_key or neither key is set in environment:
-        if not self.openai_key and not self.gemini_key:
-            raise ResearchError("Set OPENAI_API_KEY before running the research agent.")
-        if api_key is not None and not self.openai_key:
-            raise ResearchError("Set OPENAI_API_KEY before running the research agent.")
-        # If in a pytest environment testing OPENAI missing:
-        if "PYTEST_CURRENT_TEST" in os.environ and "OPENAI_API_KEY" not in os.environ and not self.openai_key:
-            raise ResearchError("Set OPENAI_API_KEY before running the research agent.")
-
-        self.model = model or os.getenv("GEMINI_MODEL") or os.getenv("OPENAI_MODEL") or ("gemini-3.5-flash-lite" if self.gemini_key else "gpt-5.5")
+        self.provider = provider or ("openai" if api_key is not None else os.getenv("NEPSE_PROVIDER"))
+        self.provider = self.provider or ("gemini" if os.getenv("GEMINI_API_KEY") else "openai")
+        if self.provider not in {"gemini", "openai"}:
+            raise ResearchError("Set NEPSE_PROVIDER to gemini or openai.")
+        key_name = "GEMINI_API_KEY" if self.provider == "gemini" else "OPENAI_API_KEY"
+        self.api_key = (api_key if api_key is not None else os.getenv(key_name, "")).strip().strip('"')
+        if not self.api_key:
+            raise ResearchError(f"Set {key_name} before running the research agent.")
+        model_name = "GEMINI_MODEL" if self.provider == "gemini" else "OPENAI_MODEL"
+        self.model = model or os.getenv(model_name) or ("gemini-3.5-flash-lite" if self.provider == "gemini" else "gpt-5.5")
         self.transport = transport
+        try:
+            self.min_sites = min_sites if min_sites is not None else int(os.getenv("NEPSE_MIN_SITES", "2"))
+            if not isinstance(self.min_sites, int) or not 2 <= self.min_sites <= 10:
+                raise ValueError
+        except ValueError as exc:
+            raise ResearchError("NEPSE_MIN_SITES must be an integer between 2 and 10.") from exc
 
-
-    def _search_nepal_financial_web(self, symbol: str, query: str, max_results: int = 6) -> list[dict[str, str]]:
-        """Search the broader web across financial portals (ShareSansar, NepseAlpha, ArthaSarokar, etc.)."""
-        search_term = f"{symbol} stock news ShareSansar NepseAlpha Arthasarokar NEPSE"
-        url = "https://lite.duckduckgo.com/lite/"
-        data = urllib.parse.urlencode({"q": search_term}).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+    def _search_instructions(self, researched_at: str, follow_up: str = "") -> str:
+        return (
+            RESEARCH_INSTRUCTIONS
+            + f"\nCurrent research time: {researched_at} (Asia/Kathmandu).\n"
+            + f"Use the internet search tool and cite at least {self.min_sites} distinct publisher sites.\n"
+            + "Run separate searches for the verified symbol/company name, current market data, "
+            "financial results, and recent news. Use site:merolagani.com and site:sharesansar.com "
+            "queries, then search NEPSE notices and the company's own investor reports. "
+            "Search site:nepsealpha.com and site:arthasarokar.com for additional public analysis and news. "
+            "Other reputable news publishers can fill gaps. A site name in this instruction "
+            "is a search target, never evidence that the site was actually retrieved. "
+            "Do not treat different URLs or subdomains of the same publisher as multiple sites. "
+            "If enough sources are unavailable, explain the gap without inventing citations.\n"
+            + follow_up
         )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                html = resp.read().decode("utf-8", errors="ignore")
-        except Exception:
-            return []
 
-        snippets = [
-            re.sub(r"<[^>]+>", "", s).strip()
-            for s in re.findall(r"<td[^>]*class=[\'\"]result-snippet[\'\"]>(.*?)</td>", html, re.DOTALL)
-        ]
-        raw_links = re.findall(r"<a[^>]*href=[\'\"]([^\'\"]+)[\'\"][^>]*>(.*?)</a>", html)
 
-        results = []
-        seen = set()
-        for raw_url, text in raw_links:
-            if "uddg=" in raw_url:
-                parsed = urllib.parse.parse_qs(urllib.parse.urlparse(raw_url).query)
-                final_url = parsed.get("uddg", [raw_url])[0]
-            elif raw_url.startswith("http"):
-                final_url = raw_url
-            else:
-                continue
+    async def _resolve_grounding_domains(self, data: dict) -> None:
+        """Identify publishers behind Google grounding redirects without fetching their pages."""
+        candidates = data.get("candidates") or []
+        chunks = (candidates[0].get("groundingMetadata") or {}).get("groundingChunks", []) if candidates else []
+        semaphore = asyncio.Semaphore(4)
+        async with httpx.AsyncClient(timeout=8, transport=self.transport) as http:
+            async def resolve(chunk: dict) -> None:
+                web = chunk.get("web") or {}
+                url = _safe_url(web.get("uri"))
+                if not url or urlsplit(url).hostname != GOOGLE_REDIRECT_HOST:
+                    return
+                if _source_domain(url, web.get("title") or "", web.get("domain") or ""):
+                    return
+                try:
+                    async with semaphore:
+                        async with http.stream("GET", url, follow_redirects=False) as response:
+                            target = _safe_url(response.headers.get("location"))
+                            if response.is_redirect and target:
+                                web["domain"] = _publisher_domain(urlsplit(target).hostname or "")
+                except httpx.HTTPError:
+                    pass  # Unresolved publishers are not counted toward site coverage.
 
-            if final_url in seen or "duckduckgo" in final_url:
-                continue
-            seen.add(final_url)
-            clean_title = re.sub(r"<[^>]+>", "", text).strip()
-            snippet = snippets[len(results)] if len(results) < len(snippets) else ""
-            results.append({"title": clean_title or final_url, "url": final_url, "snippet": snippet})
-            if len(results) >= max_results:
-                break
-        return results
+            await asyncio.gather(*(resolve(chunk) for chunk in chunks[:20]))
 
-    def _fetch_company_metrics(self, symbol: str) -> tuple[dict[str, str], str]:
-        """Fetch real-time fundamental indicators from public Nepalese market listings."""
-        url = f"https://merolagani.com/CompanyDetail.aspx?symbol={symbol}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"})
-        try:
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                html = resp.read().decode("utf-8", errors="ignore")
-        except Exception:
-            return {}, url
-
-        pairs = re.findall(r"<th[^>]*>(.*?)</th>\s*<td[^>]*>(.*?)</td>", html, re.DOTALL)
-        metrics: dict[str, str] = {}
-        for th, td in pairs:
-            cth = " ".join(re.sub(r"<[^>]+>", "", th).split())
-            ctd = " ".join(re.sub(r"<[^>]+>", "", td).split())
-            if cth and ctd:
-                metrics[cth] = ctd
-        return metrics, url
-
-    async def _research_gemini(self, query: str, researched_at: str) -> ResearchReport:
+    async def _research_gemini(self, query: str, researched_at: str, follow_up: str = "") -> ResearchReport:
         from google import genai
-        from google.genai import types
+        from google.genai import errors, types
 
-        sources_dict: dict[str, Source] = {}
-
-        def search_internet_financial_portals(search_query: str) -> str:
-            """Search the web for NEPSE news, announcements, and articles across ShareSansar, NepseAlpha, ArthaSarokar, etc."""
-            results = self._search_nepal_financial_web(search_query, query, max_results=6)
-            for r in results:
-                sources_dict[r["url"]] = Source(title=r["title"], url=r["url"])
-            formatted = [f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['snippet']}" for r in results]
-            return "\n---\n".join(formatted) if formatted else "No web results found."
-
-        def fetch_live_nepse_fundamentals(symbol: str) -> str:
-            """Fetch latest stock market price, P/E, EPS, Book Value, and corporate dividend records."""
-            clean_sym = symbol.strip().upper()
-            metrics, source_url = self._fetch_company_metrics(clean_sym)
-            if source_url:
-                sources_dict[source_url] = Source(title=f"MeroLagani - {clean_sym} Profile", url=source_url)
-            lines = [f"{k}: {v}" for k, v in metrics.items()]
-            return "\n".join(lines) if lines else f"No metrics found for symbol {clean_sym}."
-
-        prompt = (
-            f"{RESEARCH_INSTRUCTIONS}\n\n"
-            f"Research time: {researched_at} (Asia/Kathmandu)\n"
-            f"User query: {query}\n\n"
-            "INSTRUCTIONS:\n"
-            "1. Use `fetch_live_nepse_fundamentals` to inspect the company's real-time prices, earnings, and fundamentals.\n"
-            "2. Use `search_internet_financial_portals` to find live news, analysis, and reports across ShareSansar, NepseAlpha, and ArthaSarokar.\n"
-            "3. Synthesize the findings into the requested Markdown report with Graham valuation numbers and health verdict."
-        )
-
-        try:
-            client = genai.Client(api_key=self.gemini_key)
-            chat = client.chats.create(
-                model=self.model,
-                config=types.GenerateContentConfig(
-                    tools=[search_internet_financial_portals, fetch_live_nepse_fundamentals],
+        async with httpx.AsyncClient(timeout=180, transport=self.transport) as http:
+            client = genai.Client(
+                api_key=self.api_key,
+                http_options=types.HttpOptions(
+                    httpx_async_client=http, timeout=180000,
+                    retry_options=types.HttpRetryOptions(attempts=1),
                 ),
             )
-            resp = chat.send_message(prompt)
-            report_text = resp.text
-        except Exception as exc:
-            raise ResearchError(f"Gemini generation error: {exc}") from exc
+            try:
+                async with client.aio as ai:
+                    response = await ai.models.generate_content(
+                        model=self.model,
+                        contents=query,
+                        config=types.GenerateContentConfig(
+                            system_instruction=self._search_instructions(researched_at, follow_up),
+                            tools=[types.Tool(google_search=types.GoogleSearch())],
+                            max_output_tokens=12000,
+                        ),
+                    )
+                    data = response.model_dump(mode="json", by_alias=True, exclude_none=True)
+            except errors.APIError as exc:
+                raise ResearchError(
+                    f"Gemini returned HTTP {exc.code}. Check GEMINI_API_KEY, GEMINI_MODEL, quota and search access."
+                ) from exc
+            except (httpx.HTTPError, ValueError) as exc:
+                raise ResearchError("Could not complete the Gemini search request. Check connectivity and API configuration.") from exc
+            finally:
+                client.close()
+        await self._resolve_grounding_domains(data)
+        return parse_gemini_report(data, query, researched_at, self.model)
 
-        sources_links = "\n".join(f"- [{s.title}]({s.url})" for s in sources_dict.values())
-        markdown = (
-            f"Researched at: {researched_at} (Asia/Kathmandu)\n\n"
-            f"{report_text}\n\n"
-            f"## Cited sources\n\n{sources_links}\n"
-        )
-        return ResearchReport(
-            query=query,
-            researched_at=researched_at,
-            model=self.model,
-            markdown=markdown,
-            cited_sources=list(sources_dict.values()),
-            searched_urls=list(sources_dict.keys()),
-        )
-
-    async def _research_openai(self, query: str, researched_at: str) -> ResearchReport:
+    async def _research_openai(self, query: str, researched_at: str, follow_up: str = "") -> ResearchReport:
         payload = {
             "model": self.model,
-            "instructions": RESEARCH_INSTRUCTIONS + f"\nCurrent research time: {researched_at} (Asia/Kathmandu).",
+            "instructions": self._search_instructions(researched_at, follow_up),
             "input": query,
             "tools": [{"type": "web_search", "external_web_access": True}],
             "tool_choice": "required",
@@ -488,7 +444,7 @@ class NepseResearchAgent:
             async with httpx.AsyncClient(timeout=180, transport=self.transport) as client:
                 response = await client.post(
                     "https://api.openai.com/v1/responses",
-                    headers={"Authorization": f"Bearer {self.openai_key}"},
+                    headers={"Authorization": f"Bearer {self.api_key}"},
                     json=payload,
                 )
                 response.raise_for_status()
@@ -514,6 +470,29 @@ class NepseResearchAgent:
     async def research(self, query: str) -> ResearchReport:
         query = validate_query(query)
         researched_at = datetime.now(ZoneInfo("Asia/Kathmandu")).isoformat(timespec="seconds")
-        if self.gemini_key and not self.transport:
-            return await self._research_gemini(query, researched_at)
-        return await self._research_openai(query, researched_at)
+        search = self._research_gemini if self.provider == "gemini" else self._research_openai
+        follow_up = ""
+        searched_urls, search_queries = [], []
+        reason = ""
+        for attempt in range(2):
+            try:
+                report = await search(query, researched_at, follow_up)
+                searched_urls.extend(report.searched_urls)
+                search_queries.extend(report.search_queries)
+                if len(report.source_domains) >= self.min_sites:
+                    return replace(
+                        report, searched_urls=list(dict.fromkeys(searched_urls)),
+                        search_queries=list(dict.fromkeys(search_queries)),
+                    )
+                reason = f"Search cited {len(report.source_domains)} distinct sites; at least {self.min_sites} are required."
+                follow_up = (
+                    f"The previous attempt cited only these publisher sites: {', '.join(report.source_domains) or 'none'}. "
+                    "Use additional site-specific internet searches and return a complete report with citations "
+                    "from multiple publishers. Searching more pages on the same site is insufficient."
+                )
+            except EvidenceError as exc:
+                reason = str(exc)
+                follow_up = "The previous response contained no usable search evidence. Run the internet search tool and return grounded citations."
+            if attempt == 1:
+                raise EvidenceError(f"{reason} Could not verify a report from multiple sites after two attempts.")
+        raise EvidenceError("No research report was produced.")

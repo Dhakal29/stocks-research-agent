@@ -13,7 +13,7 @@ from a2a.types import Role, SendMessageRequest, TaskState
 from google.protobuf.json_format import MessageToDict
 
 from nepse_agent.agent import NepseResearchAgent, ResearchError, parse_report
-from nepse_agent.client import ask_agent
+from nepse_agent.client import ask_agent, ask_agent_report
 from nepse_agent.server import create_app
 
 
@@ -30,7 +30,7 @@ def provider_response():
             {
                 "type": "web_search_call",
                 "status": "completed",
-                "action": {"type": "search", "sources": [
+                "action": {"type": "search", "queries": ["NABIL news", "NABIL financial results"], "sources": [
                     {"url": SOURCE_URL}, {"url": SOURCE_URL},
                     {"url": "https://www.sharesansar.com/company/NABIL"},
                 ]},
@@ -42,6 +42,9 @@ def provider_response():
                     "text": text,
                     "annotations": [{
                         "type": "url_citation", "title": "Company source", "url": SOURCE_URL,
+                        "start_index": text.index(marker), "end_index": len(text),
+                    }, {
+                        "type": "url_citation", "title": "ShareSansar", "url": "https://www.sharesansar.com/company/NABIL",
                         "start_index": text.index(marker), "end_index": len(text),
                     }],
                 }],
@@ -69,8 +72,10 @@ def test_research_requires_live_search_and_preserves_provenance():
     assert "Synthetic NABIL test report." in report.markdown
     assert f"[Company source]({SOURCE_URL})" in report.markdown
     assert "cite" not in report.markdown
-    assert len(report.cited_sources) == 1
+    assert len(report.cited_sources) == 2
     assert len(report.searched_urls) == 2
+    assert report.source_domains == ["merolagani.com", "sharesansar.com"]
+    assert report.search_queries == ["NABIL news", "NABIL financial results"]
     assert report.researched_at.endswith("+05:45")
 
 
@@ -78,6 +83,7 @@ def test_citation_spans_retain_claims_and_group_multiple_sources():
     data = provider_response()
     part = data["output"][1]["content"][0]
     part["text"] = "A sourced claim must survive rendering."
+    part["annotations"] = part["annotations"][:1]
     first = part["annotations"][0]
     first.update(start_index=0, end_index=len(part["text"]), title="A [report]")
     second = copy.deepcopy(first)
@@ -129,7 +135,7 @@ def test_transport_and_invalid_json_errors():
 def test_configuration_and_invalid_queries_do_not_call_provider(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(ResearchError, match="Set OPENAI_API_KEY"):
-        NepseResearchAgent()
+        NepseResearchAgent(provider="openai")
 
     def must_not_call(request):
         pytest.fail("Invalid queries must not trigger an API call")
@@ -162,6 +168,9 @@ def test_a2a_discovery_client_and_report_artifacts():
             assert "Synthetic NABIL test report." in report
             assert SOURCE_URL in report
             assert not http.is_closed
+            metadata = await ask_agent_report("NABIL", "http://testserver", http)
+            assert metadata["source_domains"] == ["merolagani.com", "sharesansar.com"]
+            assert metadata["search_queries"] == ["NABIL news", "NABIL financial results"]
 
     asyncio.run(scenario())
 
@@ -213,6 +222,7 @@ def test_a2a_streaming_finishes_with_artifacts_and_completed_status():
 
 def test_main_entry_point_uses_installed_sdk_and_advertises_reachable_card(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("NEPSE_PROVIDER", "openai")
     module = runpy.run_path("main.py", run_name="entry_point_test")
     assert module["agent_card"].supported_interfaces[0].url == "http://127.0.0.1:8000"
     assert module["agent_card"].default_output_modes == ["text/markdown", "application/json"]

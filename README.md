@@ -4,7 +4,7 @@ An implementation of the **Agent-to-Agent (A2A) Protocol (v1.0)** specializing i
 
 The repository includes:
 - **A2A Server**: Standard JSON-RPC (`SendMessage`) service exposing an `AgentCard` at `/.well-known/agent-card.json`.
-- **NEPSE Research Engine**: Real-time market data extraction (prices, P/E, EPS, Book Value, 52-week range, dividend history) powered by **Google Gemini** (`gemini-3.5-flash-lite`) or **OpenAI**.
+- **NEPSE Research Engine**: Internet search across multiple websites using **Google Gemini** (`gemini-3.5-flash-lite`) or **OpenAI**, with dated market information, fundamentals, news and citations.
 - **Interactive Chat UI**: Streamlit web chat with conversation history and automated server fallback.
 - **CLI Tools & Client**: Query agents directly, via CLI, or over the network.
 
@@ -26,8 +26,8 @@ The repository includes:
         ┌──────┴───────────────────────┐
         ▼                              ▼
 ┌──────────────┐              ┌────────────────┐
-│ Live Market  │              │ Gemini / LLM   │
-│ Data Fetcher │              │ Synthesis      │
+│ Internet     │              │ Gemini / LLM   │
+│ Search Tool  │              │ Synthesis      │
 └──────────────┘              └────────────────┘
 ```
 
@@ -36,7 +36,8 @@ The repository includes:
 ## Features
 
 - **Standard A2A Protocol**: Fully compliant `AgentCard` metadata, task state lifecycle (`TASK_STATE_WORKING` -> `TASK_STATE_COMPLETED`), and structured report artifacts.
-- **Real-Time Fundamental Metrics**: Fetches latest traded price, PE ratio, EPS, Book Value, market capitalization, 52-week range, and dividend track record.
+- **Fundamentals and News**: Searches for the latest available prices, financial metrics, dated company results and corporate announcements.
+- **Multiple Website Sources**: Requires citations from at least two publisher sites, with one further search attempt when coverage is insufficient. Configure the threshold with `NEPSE_MIN_SITES`.
 - **AI-Powered Financial Insights**: Synthesizes market observations and highlights sector risks.
 - **Multiple Interfaces**:
   - Interactive Web Chat UI (Streamlit)
@@ -69,6 +70,8 @@ The repository includes:
    Create a `.env` file in the root directory:
    ```bash
    GEMINI_API_KEY="your-gemini-api-key"
+   NEPSE_PROVIDER="gemini"
+   NEPSE_MIN_SITES=2
    # Optional: OPENAI_API_KEY="your-openai-api-key"
    ```
 
@@ -134,6 +137,15 @@ Or output raw JSON data:
 python -m nepse_agent research "NABIL" --json
 ```
 
+The Gemini backend registers `types.Tool(google_search=types.GoogleSearch())`.
+Its returned grounding metadata supplies the actual search queries and source
+citations. The JSON report includes `source_domains`, `search_queries`,
+`cited_sources` and Google Search suggestions for graphical clients.
+See [the search-tool and source-coverage guide](nepse_agent/README.md#internet-search-tool-and-source-coverage)
+for configuration and [Google's grounding documentation](https://ai.google.dev/gemini-api/docs/generate-content/google-search)
+for the API contract. Prices retain their source dates; search does not guarantee
+a live quote or access to paywalled financial data.
+
 ---
 
 ## Running Automated Tests
@@ -154,7 +166,7 @@ python -m pytest tests/test_nepse_agent.py
 ├── chat_ui.py                 # Streamlit chat interface
 │
 ├── nepse_agent/               # NEPSE A2A Agent package
-│   ├── agent.py               # Research logic, scraping & LLM synthesis
+│   ├── agent.py               # Internet search tools, grounding, source coverage & synthesis
 │   ├── server.py              # A2A AgentCard & JSON-RPC server routes
 │   ├── client.py              # A2A client helper for inter-agent communication
 │   └── __main__.py            # CLI entry point (serve, research, ask)
