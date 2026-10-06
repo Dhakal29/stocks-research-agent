@@ -34,7 +34,7 @@ class NepseAgentExecutor(AgentExecutor):
             return
         await updater.update_status(
             TaskState.TASK_STATE_WORKING,
-            new_text_message("Searching company data, financial reports and recent news..."),
+            new_text_message("Researching your question across web sources..."),
         )
         try:
             report = await self.agent.research(query)
@@ -67,7 +67,7 @@ def create_app(
 ) -> Starlette:
     card = AgentCard(
         name="NEPSE Research Agent",
-        description="Research NEPSE symbols using current web evidence, news and company fundamentals.",
+        description="Answer market summaries, company questions, comparisons and broader research queries using evidence from multiple websites.",
         version="0.1.0",
         default_input_modes=["text/plain"],
         default_output_modes=["text/markdown", "application/json"],
@@ -81,6 +81,14 @@ def create_app(
             description="Find sourced market information, recent news, financial metrics and corporate actions.",
             tags=["nepse", "stocks", "news", "fundamentals", "web-search"],
             examples=["NABIL", "Research EBL news and fundamentals", "What changed recently for NLIC?"],
+            input_modes=["text/plain"],
+            output_modes=["text/markdown", "application/json"],
+        ), AgentSkill(
+            id="market_and_web_research",
+            name="Market summaries and web research",
+            description="Answer natural-language questions about markets, sectors, news, the economy and other topics; no stock symbol required.",
+            tags=["markets", "nepse", "economy", "research", "web-search"],
+            examples=["Give me today's market summary", "Compare NABIL and EBL", "Latest Nepal economic news", "How do interest rates affect share prices?"],
             input_modes=["text/plain"],
             output_modes=["text/markdown", "application/json"],
         )],

@@ -12,10 +12,10 @@ from .agent import NepseResearchAgent, ResearchError
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Research NEPSE stocks with sourced web information.")
+    parser = argparse.ArgumentParser(description="Answer market and research questions with sourced web information.")
     commands = parser.add_subparsers(dest="command", required=True)
-    research = commands.add_parser("research", help="Research a symbol or question directly")
-    research.add_argument("query", help='For example: "NABIL" or "EBL latest news and fundamentals"')
+    research = commands.add_parser("research", help="Research a question or stock symbol directly")
+    research.add_argument("query", help='For example: "Give me today\'s market summary", "Compare NABIL and EBL", or "NABIL"')
     research.add_argument("--json", action="store_true", help="Return report text and source metadata as JSON")
     serve = commands.add_parser("serve", help="Start the A2A agent server")
     serve.add_argument("--host", default="127.0.0.1")

@@ -1,1 +1,1 @@
-"""NEPSE company research through web search and the A2A protocol."""
+"""Market and query-based web research through the A2A protocol."""

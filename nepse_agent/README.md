@@ -1,17 +1,19 @@
 # NEPSE Research Agent
 
-Give this agent `NABIL`, `EBL`, `NLIC`, or a question containing a NEPSE symbol.
+Give this agent a natural-language question, such as "Give me today's market
+summary", "Latest Nepal economic news", "Compare NABIL and EBL", or a stock
+symbol such as `NABIL`. A symbol is optional.
 It uses Gemini's Google Search tool, or OpenAI's hosted web-search tool, to
 gather evidence across multiple websites and write a report. The A2A server
 makes this researcher discoverable and callable by other agents.
 
 ```mermaid
 flowchart LR
-    User[Symbol or question] --> Research[NEPSE research agent]
+    User[Research question or symbol] --> Research[Choose scope and answer format]
     Host[A2A client or host agent] --> Server[A2A server]
     Server --> Research
     Research --> Search[Hosted web search]
-    Search --> Evidence[Company reports, NEPSE, regulators, news portals]
+    Search --> Evidence[Relevant primary sources and news across the web]
     Evidence --> Report[Report with dates and source links]
     Report --> User
     Report --> Server
@@ -37,6 +39,9 @@ Ask a more specific question, or save a report:
 
 ```bash
 python -m nepse_agent research "EBL latest news, dividends and fundamentals"
+python -m nepse_agent research "Give me today's market summary in 200 words"
+python -m nepse_agent research "Which NEPSE sectors performed best this week?"
+python -m nepse_agent research "Compare NABIL and EBL's latest quarterly results"
 python -m nepse_agent research "NLIC" > nlic-report.md
 python -m nepse_agent research "NABIL" --json > nabil-report.json
 ```
@@ -55,11 +60,18 @@ config=types.GenerateContentConfig(
 )
 ```
 
-The model is instructed to make separate searches for company identity, latest
-market information, fundamentals and recent news. Search targets include
-MeroLagani, ShareSansar, NEPSE, NepseAlpha, ArthaSarokar and the company's own
-financial disclosures. Targets are instructions; the application reports only
-sources returned by the search API and linked to claims in its response.
+The model chooses the intent, entities, market, timeframe and answer format from
+the question within the same search-enabled request. It starts with broad web
+searches, then makes focused searches for relevant facts and primary sources.
+Company identity and financial statements are researched when the question
+needs them. An overall market summary does not request a company report.
+
+There is no website allowlist. Example Nepal finance sources include NEPSE,
+SEBON, NRB, company disclosures, ShareSansar, MeroLagani, NepseAlpha,
+ArthaSarokar, Onlinekhabar and The Kathmandu Post. Other topics and countries
+use appropriate sources. Targets are instructions; the application reports
+only sources returned by the search API and linked to claims in its response.
+It retrieves relevant public evidence, not every page on the internet.
 
 Reports must cite at least two distinct publisher domains. Duplicate URLs,
 portal subdomains and NEPSE's alternate hostname do not increase this count.
@@ -130,7 +142,30 @@ python -m nepse_agent serve --host 127.0.0.1 --port 10001 --public-url http://12
 python -m nepse_agent ask "EBL" --url http://127.0.0.1:10001
 ```
 
-## What the report asks the model to collect
+## How the question shapes the answer
+
+| Query | Expected answer |
+| --- | --- |
+| "Give me today's market summary" | Actual trading session, index movement, turnover, breadth, sectors, gainers/losers and relevant news, where verified |
+| "Latest IPO announcements in Nepal" | Dated announcements, their status and source links |
+| "Compare NABIL and EBL" | A comparison using the same financial periods and units where available |
+| "How do interest rates affect share prices?" | A direct explanation supported by relevant sources |
+| "NABIL" | A full company report covering the areas below |
+
+Unqualified market questions default to NEPSE/Nepal, with the assumption stated
+in the answer. Explicitly named countries or markets take precedence. Questions
+outside Nepal finance are researched on their own terms. The model follows the
+user's requested language, length and format; a focused stock question only
+includes relevant sections.
+
+"Today" is resolved using the supplied research date in Asia/Kathmandu, with
+the trading timezone identified for another market. The model must verify the
+actual session date, label provisional intraday data, and identify the latest
+verified session when today's figures cannot be found. A closure or holiday
+must be verified before being asserted. These are model instructions, not a
+guarantee that every source has fresh or complete data.
+
+For a full company report:
 
 | Area | Information |
 | --- | --- |
@@ -149,7 +184,8 @@ and [ShareSansar company profile](https://www.sharesansar.com/company/NABIL).
 ## How it works and how to extend it
 
 - `agent.py` contains the research instructions, registered internet search tools,
-  provider calls and citation renderers. Gemini's grounding metadata maps claims
+  provider calls and citation renderers. The instructions select the research
+  approach and relevant answer sections from the query. Gemini's grounding metadata maps claims
   to source URLs; OpenAI's web-search annotations provide the same attribution.
   The research entry point rejects reports with insufficient cited-site coverage.
 - `server.py` wraps that researcher in the same executor/task/card structure as

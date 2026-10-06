@@ -19,17 +19,17 @@ PORT = 8000
                                                                                                                     
 nepse_skill = AgentSkill(                                                                                         
     id="nepse_summarizer",                                                                                        
-    name="NEPSE Stock Summarizer",                                                                                
-    description="Takes a NEPSE stock symbol (e.g. NABIL, SHIVM, CHCL), searches recent web news, and returns an investment summary.",                                                                                               
+    name="Market and Web Research",
+    description="Answers market summaries, stock questions, comparisons, news and other research queries using multiple web sources.",
     input_modes=["text/plain"],                                                                                   
     output_modes=["text/markdown", "application/json"],
-    tags=["finance", "nepse", "nepal-share-market", "stocks"],                                                    
-    examples=["NABIL", "HDL", "SHIVM", "Analyze CIT"],                                                            
+    tags=["finance", "nepse", "nepal-share-market", "stocks", "web-search"],
+    examples=["Give me today's market summary", "Compare NABIL and EBL", "Latest Nepal economic news", "NABIL"],
 )                                                                                                                 
                                                                                                                     
 agent_card = AgentCard(                                                                                           
-    name="NEPSE Stock Assistant",                                                                                 
-    description="An A2A-compliant agent specializing in Nepal Stock Exchange (NEPSE) company research and news summaries.",                                                                                                        
+    name="NEPSE Market Research Assistant",
+    description="An A2A research agent answering natural-language questions with current evidence across the web, specializing in Nepal markets.",
     version="1.0.0",                                                                                              
     default_input_modes=["text/plain"],                                                                           
     default_output_modes=["text/markdown", "application/json"],

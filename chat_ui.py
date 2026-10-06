@@ -6,8 +6,8 @@ from nepse_agent.client import AgentUnavailableError, ask_agent_report
 from nepse_agent.agent import NepseResearchAgent, ResearchError
 
 st.set_page_config(page_title="NEPSE Agent Chat", page_icon="📈", layout="centered")
-st.title("📈 NEPSE A2A Research Assistant")
-st.caption("Ask questions about any NEPSE listed stock (e.g., NABIL, SHIVM, CHCL, EBL)")
+st.title("📈 NEPSE Market & Web Research Assistant")
+st.caption("Ask for today's market summary, company research, comparisons, news, or another research question.")
 
 # Initialize chat history
 if "messages" not in st.session_state:
@@ -21,14 +21,14 @@ for msg in st.session_state.messages:
             html(msg["search_suggestions_html"], height=120, scrolling=True)
 
 # User prompt
-prompt = st.chat_input("Enter NEPSE symbol or question:")
+prompt = st.chat_input("Ask a question, e.g. Give me today's market summary")
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Researching company data & news..."):
+        with st.spinner("Researching your question across web sources..."):
             try:
                 # Try calling via A2A Server first
                 try:

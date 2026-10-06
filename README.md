@@ -1,6 +1,6 @@
 # Agent-to-Agent (A2A) Protocol: NEPSE Research Agent
 
-An implementation of the **Agent-to-Agent (A2A) Protocol (v1.0)** specializing in Nepal Stock Exchange (NEPSE) equity research, financial analysis, and live corporate insights.
+An implementation of the **Agent-to-Agent (A2A) Protocol (v1.0)** answering natural-language research questions, specializing in Nepal Stock Exchange (NEPSE) markets, companies and the economy.
 
 The repository includes:
 - **A2A Server**: Standard JSON-RPC (`SendMessage`) service exposing an `AgentCard` at `/.well-known/agent-card.json`.
@@ -37,6 +37,7 @@ The repository includes:
 
 - **Standard A2A Protocol**: Fully compliant `AgentCard` metadata, task state lifecycle (`TASK_STATE_WORKING` -> `TASK_STATE_COMPLETED`), and structured report artifacts.
 - **Fundamentals and News**: Searches for the latest available prices, financial metrics, dated company results and corporate announcements.
+- **Answers Based on the Query**: Supports today's market summary, news, sector analysis, comparisons, economic questions and other research topics. A stock symbol is optional; a bare symbol still requests a full company report.
 - **Multiple Website Sources**: Requires citations from at least two publisher sites, with one further search attempt when coverage is insufficient. Configure the threshold with `NEPSE_MIN_SITES`.
 - **AI-Powered Financial Insights**: Synthesizes market observations and highlights sector risks.
 - **Multiple Interfaces**:
@@ -85,7 +86,18 @@ Launch the web chat interface:
 ```bash
 streamlit run chat_ui.py
 ```
-Open `http://localhost:8501` in your browser. Enter any stock symbol (e.g., `NABIL`, `SHIVM`, `CHCL`, `EBL`) to receive a full research report.
+Open `http://localhost:8501` in your browser. Ask a question such as:
+
+- "Give me today's market summary."
+- "Which NEPSE sectors performed best this week?"
+- "Compare NABIL and EBL's latest financial results."
+- "What are the latest IPO announcements in Nepal?"
+- "How do interest rates affect Nepal's stock market?"
+
+You can also enter a stock symbol (e.g., `NABIL`) for a full company report.
+Unspecified market questions default to NEPSE; name another market explicitly
+to research it. The answer follows the question's topic, timeframe, language
+and requested level of detail.
 
 ---
 
@@ -131,6 +143,8 @@ python -m nepse_agent serve --port 10000
 Run research directly without starting an HTTP server:
 ```bash
 python -m nepse_agent research "NABIL"
+python -m nepse_agent research "Give me today's market summary"
+python -m nepse_agent research "Latest Nepal economic news in Nepali"
 ```
 Or output raw JSON data:
 ```bash
@@ -141,6 +155,12 @@ The Gemini backend registers `types.Tool(google_search=types.GoogleSearch())`.
 Its returned grounding metadata supplies the actual search queries and source
 citations. The JSON report includes `source_domains`, `search_queries`,
 `cited_sources` and Google Search suggestions for graphical clients.
+The model plans searches from the user's question, starts with broad web searches,
+then checks relevant primary sources and other publishers. It is not restricted
+to MeroLagani or a fixed list of sites. Search retrieves relevant accessible
+evidence; it cannot read the entire internet. For today's summaries, the model
+is instructed to verify the actual session date, label intraday data and identify
+older data when today's figures are unavailable.
 See [the search-tool and source-coverage guide](nepse_agent/README.md#internet-search-tool-and-source-coverage)
 for configuration and [Google's grounding documentation](https://ai.google.dev/gemini-api/docs/generate-content/google-search)
 for the API contract. Prices retain their source dates; search does not guarantee
@@ -152,7 +172,7 @@ a live quote or access to paywalled financial data.
 
 Run the test suite with pytest:
 ```bash
-python -m pytest tests/test_nepse_agent.py
+python -m pytest -q -p no:cacheprovider tests
 ```
 
 ---
