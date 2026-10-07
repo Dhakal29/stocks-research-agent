@@ -6,8 +6,8 @@ from nepse_agent.client import AgentUnavailableError, ask_agent_report
 from nepse_agent.agent import NepseResearchAgent, ResearchError, configure_research_logging
 
 configure_research_logging()
-st.set_page_config(page_title="NEPSE Agent Chat", page_icon="📈", layout="centered")
-st.title("📈 NEPSE Market & Web Research Assistant")
+st.set_page_config(page_title="NEPSE Research Agent", page_icon="📈", layout="centered")
+st.title("📈 NEPSE Research Agent")
 st.caption("Ask for today's market summary, company research, comparisons, news, or another research question.")
 
 # Initialize chat history

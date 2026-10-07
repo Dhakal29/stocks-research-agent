@@ -1,6 +1,8 @@
-# Agent-to-Agent (A2A) Protocol: NEPSE Research Agent
+# NEPSE Research Agent
 
-An implementation of the **Agent-to-Agent (A2A) Protocol (v1.0)** answering natural-language research questions, specializing in Nepal Stock Exchange (NEPSE) markets, companies and the economy.
+A web research assistant for Nepal Stock Exchange (NEPSE) markets, companies and the economy. Ask natural-language questions and receive dated answers with citations from multiple websites. Built with Google Gemini and the **Agent-to-Agent (A2A) Protocol (v1.0)**.
+
+Repository: [`nepse-research-agent`](https://github.com/Dhakal29/nepse-research-agent).
 
 The repository includes:
 - **A2A Server**: Standard JSON-RPC (`SendMessage`) service exposing an `AgentCard` at `/.well-known/agent-card.json`.
@@ -52,8 +54,8 @@ The repository includes:
 
 1. **Clone the repository**:
    ```bash
-   git clone <repo-url>
-   cd A2A_Protocol
+   git clone https://github.com/Dhakal29/nepse-research-agent.git
+   cd nepse-research-agent
    ```
 
 2. **Create and activate a virtual environment**:
@@ -71,10 +73,13 @@ The repository includes:
    Create a `.env` file in the root directory:
    ```bash
    GEMINI_API_KEY="your-gemini-api-key"
+   GEMINI_MODEL="gemini-2.5-flash"
    NEPSE_PROVIDER="gemini"
    NEPSE_MIN_SITES=2
    # Optional: OPENAI_API_KEY="your-openai-api-key"
    ```
+
+   > **Note**: Always keep `NEPSE_PROVIDER="gemini"` explicitly set in `.env` to prevent the agent from expecting an OpenAI key by default.
 
 ---
 
@@ -185,7 +190,7 @@ python -m pytest -q -p no:cacheprovider tests
 ├── requirements.txt           # Production dependencies
 ├── chat_ui.py                 # Streamlit chat interface
 │
-├── nepse_agent/               # NEPSE A2A Agent package
+├── nepse_agent/               # Research engine and A2A integration
 │   ├── agent.py               # Internet search tools, grounding, source coverage & synthesis
 │   ├── server.py              # A2A AgentCard & JSON-RPC server routes
 │   ├── client.py              # A2A client helper for inter-agent communication

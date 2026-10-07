@@ -201,8 +201,8 @@ and [ShareSansar company profile](https://www.sharesansar.com/company/NABIL).
   approach and relevant answer sections from the query. Gemini's grounding metadata maps claims
   to source URLs; OpenAI's web-search annotations provide the same attribution.
   The research entry point rejects reports with insufficient cited-site coverage.
-- `server.py` wraps that researcher in the same executor/task/card structure as
-  the existing HelloWorld sample, using your installed A2A SDK 1.2.0.
+- `server.py` exposes the researcher through A2A agent discovery, JSON-RPC
+  requests, task updates and report artifacts using A2A SDK 1.2.0.
 - `client.py` demonstrates discovery and a request through the A2A client SDK.
 - `__main__.py` provides the three terminal commands.
 

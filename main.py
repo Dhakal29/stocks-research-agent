@@ -28,7 +28,7 @@ nepse_skill = AgentSkill(
 )                                                                                                                 
                                                                                                                     
 agent_card = AgentCard(                                                                                           
-    name="NEPSE Market Research Assistant",
+    name="NEPSE Research Agent",
     description="An A2A research agent answering natural-language questions with current evidence across the web, specializing in Nepal markets.",
     version="1.0.0",                                                                                              
     default_input_modes=["text/plain"],                                                                           
@@ -60,6 +60,6 @@ app = Starlette(
                                                                                                                     
 if __name__ == "__main__":                                                                                        
     configure_research_logging()
-    print(f"NEPSE A2A Agent running at: http://{HOST}:{PORT}")                                                    
+    print(f"NEPSE Research Agent running at: http://{HOST}:{PORT}")
     print(f"Discovery Card: http://{HOST}:{PORT}/.well-known/agent-card.json")
     uvicorn.run(app, host=HOST, port=PORT) 
