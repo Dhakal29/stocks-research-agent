@@ -102,6 +102,15 @@ Gemini's returned Google Search suggestions are preserved as
 Other graphical clients should render those suggestions and the citation links.
 The terminal prints Markdown; `--json` also exposes the HTML and search metadata.
 
+The CLI, `main.py` server and Streamlit UI enable research `INFO` logs on stderr.
+They show the user query, each attempt's provider/model, Gemini request/response
+progress, grounding chunk counts, Google Search queries, and the report's cited
+publisher domains. Logs stay separate from reports and JSON written to stdout.
+When the UI uses A2A, research logs appear in the server's terminal; direct
+fallback research logs appear in the Streamlit terminal. Python integrations
+can call `configure_research_logging()` from `nepse_agent.agent` to enable the
+same output, or configure the `nepse_agent` logger themselves.
+
 ## Use through A2A
 
 Start the server in one terminal with the API key exported:

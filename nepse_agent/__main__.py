@@ -8,10 +8,11 @@ from dataclasses import asdict
 
 import httpx
 
-from .agent import NepseResearchAgent, ResearchError
+from .agent import NepseResearchAgent, ResearchError, configure_research_logging
 
 
 def main() -> None:
+    configure_research_logging()
     parser = argparse.ArgumentParser(description="Answer market and research questions with sourced web information.")
     commands = parser.add_subparsers(dest="command", required=True)
     research = commands.add_parser("research", help="Research a question or stock symbol directly")

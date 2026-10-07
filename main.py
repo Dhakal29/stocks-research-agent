@@ -11,7 +11,7 @@ from a2a.types import (
     AgentSkill,                                                                                                   
 )                                                                                                                 
                                                                                                                     
-from nepse_agent.agent import NepseResearchAgent
+from nepse_agent.agent import NepseResearchAgent, configure_research_logging
 from nepse_agent.server import NepseAgentExecutor
                                                                                                                     
 HOST = "127.0.0.1"                                                                                                
@@ -59,6 +59,7 @@ app = Starlette(
 )                                                                                                                 
                                                                                                                     
 if __name__ == "__main__":                                                                                        
+    configure_research_logging()
     print(f"NEPSE A2A Agent running at: http://{HOST}:{PORT}")                                                    
     print(f"Discovery Card: http://{HOST}:{PORT}/.well-known/agent-card.json")
     uvicorn.run(app, host=HOST, port=PORT) 

@@ -3,8 +3,9 @@ import asyncio
 from dataclasses import asdict
 from streamlit.components.v1 import html
 from nepse_agent.client import AgentUnavailableError, ask_agent_report
-from nepse_agent.agent import NepseResearchAgent, ResearchError
+from nepse_agent.agent import NepseResearchAgent, ResearchError, configure_research_logging
 
+configure_research_logging()
 st.set_page_config(page_title="NEPSE Agent Chat", page_icon="📈", layout="centered")
 st.title("📈 NEPSE Market & Web Research Assistant")
 st.caption("Ask for today's market summary, company research, comparisons, news, or another research question.")

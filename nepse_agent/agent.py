@@ -1,6 +1,7 @@
 """Search-backed research, independent of the A2A transport."""
 
 import asyncio
+import logging
 import os
 import re
 from dataclasses import dataclass, field, replace
@@ -10,6 +11,15 @@ from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
+
+logger = logging.getLogger(__name__)
+
+
+def configure_research_logging() -> None:
+    """Show research INFO logs on stderr while preserving other logger levels."""
+    logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("nepse_agent").setLevel(logging.INFO)
+
 
 def _load_env() -> None:
     if "PYTEST_CURRENT_TEST" in os.environ:
@@ -335,6 +345,8 @@ def parse_gemini_report(data: dict, query: str, researched_at: str, model: str) 
     metadata = candidate.get("groundingMetadata") or {}
     chunks = metadata.get("groundingChunks") or []
     queries = metadata.get("webSearchQueries") or []
+    logger.info("[parse_gemini_report] Google Search queries executed by model: %s", queries)
+    logger.info("[parse_gemini_report] Total web chunks found: %d", len(chunks))
     if not queries or not chunks:
         raise EvidenceError("Gemini returned no web search evidence. The Google Search tool must run.")
 
@@ -434,6 +446,10 @@ class NepseResearchAgent:
         """Identify publishers behind Google grounding redirects without fetching their pages."""
         candidates = data.get("candidates") or []
         chunks = (candidates[0].get("groundingMetadata") or {}).get("groundingChunks", []) if candidates else []
+        logger.info(
+            "[_resolve_grounding_domains] Resolving publisher redirect URLs for %d chunks...",
+            len(chunks),
+        )
         semaphore = asyncio.Semaphore(4)
         async with httpx.AsyncClient(timeout=8, transport=self.transport) as http:
             async def resolve(chunk: dict) -> None:
@@ -453,6 +469,10 @@ class NepseResearchAgent:
                     pass  # Unresolved publishers are not counted toward site coverage.
 
             await asyncio.gather(*(resolve(chunk) for chunk in chunks[:20]))
+        logger.info(
+            "[_resolve_grounding_domains] Finished inspecting %d grounding chunks for publisher domains.",
+            len(chunks[:20]),
+        )
 
     async def _research_gemini(self, query: str, researched_at: str, follow_up: str = "") -> ResearchReport:
         from google import genai
@@ -468,6 +488,7 @@ class NepseResearchAgent:
             )
             try:
                 async with client.aio as ai:
+                    logger.info("[_research_gemini] Sending prompt to Gemini with Google Search tool...")
                     response = await ai.models.generate_content(
                         model=self.model,
                         contents=query,
@@ -486,8 +507,11 @@ class NepseResearchAgent:
                 raise ResearchError("Could not complete the Gemini search request. Check connectivity and API configuration.") from exc
             finally:
                 client.close()
+        logger.info("[_research_gemini] Response received. Resolving search grounding chunks...")
         await self._resolve_grounding_domains(data)
-        return parse_gemini_report(data, query, researched_at, self.model)
+        report = parse_gemini_report(data, query, researched_at, self.model)
+        logger.info("[_research_gemini] Parsed Gemini report for query: %r", query)
+        return report
 
     async def _research_openai(self, query: str, researched_at: str, follow_up: str = "") -> ResearchReport:
         payload = {
@@ -529,21 +553,35 @@ class NepseResearchAgent:
 
     async def research(self, query: str) -> ResearchReport:
         query = validate_query(query)
+        logger.info("[research] Starting research for query: %r", query)
         researched_at = datetime.now(ZoneInfo("Asia/Kathmandu")).isoformat(timespec="seconds")
         search = self._research_gemini if self.provider == "gemini" else self._research_openai
         follow_up = ""
         searched_urls, search_queries = [], []
         reason = ""
         for attempt in range(2):
+            logger.info(
+                "[research] Attempt %d: querying provider '%s' (model: %s)",
+                attempt + 1, self.provider, self.model,
+            )
             try:
                 report = await search(query, researched_at, follow_up)
+                logger.info(
+                    "[research] Received report with %d citations across %d domains: %s",
+                    len(report.cited_sources), len(report.source_domains), report.source_domains,
+                )
                 searched_urls.extend(report.searched_urls)
                 search_queries.extend(report.search_queries)
                 if len(report.source_domains) >= self.min_sites:
-                    return replace(
+                    report = replace(
                         report, searched_urls=list(dict.fromkeys(searched_urls)),
                         search_queries=list(dict.fromkeys(search_queries)),
                     )
+                    logger.info(
+                        "[research] Research completed for query: %r with %d searched URLs and %d search queries.",
+                        query, len(report.searched_urls), len(report.search_queries),
+                    )
+                    return report
                 reason = f"Search cited {len(report.source_domains)} distinct sites; at least {self.min_sites} are required."
                 follow_up = (
                     f"The previous attempt cited only these publisher sites: {', '.join(report.source_domains) or 'none'}. "
