@@ -23,8 +23,9 @@ flowchart LR
 ## Run from the repository root
 
 Requires Python 3.11+ and a Gemini or OpenAI API key with search access.
-Gemini is selected when `GEMINI_API_KEY` is set; otherwise OpenAI is selected.
-Set `NEPSE_PROVIDER=gemini` or `NEPSE_PROVIDER=openai` to choose explicitly.
+Gemini is the default provider and requires only `GEMINI_API_KEY`.
+OpenAI is optional: set `NEPSE_PROVIDER=openai` and `OPENAI_API_KEY` to use it.
+Set `NEPSE_PROVIDER=gemini` to select Gemini explicitly.
 Model settings are `GEMINI_MODEL` (default `gemini-3.5-flash-lite`) and
 `OPENAI_MODEL` (default `gpt-5.5`). Provider API and search charges apply.
 
@@ -47,7 +48,8 @@ python -m nepse_agent research "NABIL" --json > nabil-report.json
 ```
 
 Settings may be exported or placed in the repository's `.env` file. Exported
-variables take precedence over values in that file.
+variables take precedence over values in that file. Both `GEMINI_API_KEY=...`
+and `export GEMINI_API_KEY=...` are accepted in `.env`.
 
 ## Internet search tool and source coverage
 
@@ -106,6 +108,8 @@ The CLI, `main.py` server and Streamlit UI enable research `INFO` logs on stderr
 They show the user query, each attempt's provider/model, Gemini request/response
 progress, grounding chunk counts, Google Search queries, and the report's cited
 publisher domains. Logs stay separate from reports and JSON written to stdout.
+Each entry includes the logger's module name, source filename, line number and
+function name, for example `nepse_agent.agent [agent.py:558 | research]`.
 When the UI uses A2A, research logs appear in the server's terminal; direct
 fallback research logs appear in the Streamlit terminal. Python integrations
 can call `configure_research_logging()` from `nepse_agent.agent` to enable the

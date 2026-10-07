@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 def configure_research_logging() -> None:
     """Show research INFO logs on stderr while preserving other logger levels."""
-    logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)s %(name)s [%(filename)s:%(lineno)d | %(funcName)s]: %(message)s"
+    )
     logging.getLogger("nepse_agent").setLevel(logging.INFO)
 
 
@@ -27,13 +29,14 @@ def _load_env() -> None:
     for env_path in [".env", os.path.join(os.path.dirname(__file__), "..", ".env")]:
         if os.path.exists(env_path):
             try:
-                with open(env_path, encoding="utf-8") as f:
+                with open(env_path, encoding="utf-8-sig") as f:
                     for line in f:
                         line = line.strip()
+                        line = re.sub(r"^export\s+", "", line)
                         if line and not line.startswith("#") and "=" in line:
                             k, v = line.split("=", 1)
                             k, v = k.strip(), v.strip().strip('"').strip("'")
-                            if k not in os.environ:
+                            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and k not in os.environ:
                                 os.environ[k] = v
                 break
             except Exception:
@@ -406,7 +409,7 @@ class NepseResearchAgent:
         min_sites: int | None = None,
     ) -> None:
         self.provider = provider or ("openai" if api_key is not None else os.getenv("NEPSE_PROVIDER"))
-        self.provider = self.provider or ("gemini" if os.getenv("GEMINI_API_KEY") else "openai")
+        self.provider = self.provider or "gemini"
         if self.provider not in {"gemini", "openai"}:
             raise ResearchError("Set NEPSE_PROVIDER to gemini or openai.")
         key_name = "GEMINI_API_KEY" if self.provider == "gemini" else "OPENAI_API_KEY"
