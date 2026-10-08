@@ -1,8 +1,8 @@
-# NEPSE Research Agent
+# Stocks Research Agent
 
 A web research assistant for Nepal Stock Exchange (NEPSE) markets, companies and the economy. Ask natural-language questions and receive dated answers with citations from multiple websites. Built with Google Gemini and the **Agent-to-Agent (A2A) Protocol (v1.0)**.
 
-Repository: [`nepse-research-agent`](https://github.com/Dhakal29/nepse-research-agent).
+Repository: [`stocks-research-agent`](https://github.com/Dhakal29/stocks-research-agent).
 
 The repository includes:
 - **A2A Server**: Standard JSON-RPC (`SendMessage`) service exposing an `AgentCard` at `/.well-known/agent-card.json`.
@@ -38,6 +38,8 @@ The repository includes:
 ## Features
 
 - **Standard A2A Protocol**: Fully compliant `AgentCard` metadata, task state lifecycle (`TASK_STATE_WORKING` -> `TASK_STATE_COMPLETED`), and structured report artifacts.
+- **RAG-Powered Investment Analysis (Training Books Knowledge Store)**: Indexes training books (`training_books/*.pdf` including *Module 3: Fundamental Analysis* & financial research overviews) to evaluate stocks using institutional due diligence checklists, solvency checks, operational ratios, and Graham Margin of Safety formulas.
+- **Investment Grade Verdict Scorecard**: Gives a clear, qualified investment assessment (`[INVESTMENT GRADE / ATTRACTIVE]`, `[MODERATE / FAIR VALUE (HOLD)]`, or `[AVOID / HIGH SPECULATION]`) with key strengths, risk flags, and explicit citations to training book chapters.
 - **Fundamentals and News**: Searches for the latest available prices, financial metrics, dated company results and corporate announcements.
 - **Answers Based on the Query**: Supports today's market summary, news, sector analysis, comparisons, economic questions and other research topics. A stock symbol is optional; a bare symbol still requests a full company report.
 - **Multiple Website Sources**: Requires citations from at least two publisher sites, with one further search attempt when coverage is insufficient. Configure the threshold with `NEPSE_MIN_SITES`.
