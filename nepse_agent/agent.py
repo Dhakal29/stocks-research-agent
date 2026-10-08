@@ -522,7 +522,7 @@ class NepseResearchAgent:
                         model=self.model,
                         contents=query,
                         config=types.GenerateContentConfig(
-                            system_instruction=self._search_instructions(researched_at, follow_up),
+                            system_instruction=self._search_instructions(researched_at, follow_up, query=query),
                             tools=[types.Tool(google_search=types.GoogleSearch())],
                             max_output_tokens=12000,
                         ),
@@ -545,7 +545,7 @@ class NepseResearchAgent:
     async def _research_openai(self, query: str, researched_at: str, follow_up: str = "") -> ResearchReport:
         payload = {
             "model": self.model,
-            "instructions": self._search_instructions(researched_at, follow_up),
+            "instructions": self._search_instructions(researched_at, follow_up, query=query),
             "input": query,
             "tools": [{"type": "web_search", "external_web_access": True}],
             "tool_choice": "required",
