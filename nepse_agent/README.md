@@ -6,6 +6,10 @@ symbol such as `NABIL`. A symbol is optional.
 It uses Gemini's Google Search tool, or OpenAI's hosted web-search tool, to
 gather evidence across multiple websites and write a report. The A2A server
 makes this researcher discoverable and callable by other agents.
+The shared research engine also retrieves investment-book passages from a
+local RAG store and includes their book, chapter and PDF page references in
+the model prompt. Full company reports request a financial scorecard and an
+investment verdict based on the supplied context and current web evidence.
 
 ```mermaid
 flowchart LR
@@ -13,6 +17,10 @@ flowchart LR
     Host[A2A client or host agent] --> Server[A2A server]
     Server --> Research
     Research --> Search[Hosted web search]
+    Books[Local PDF investment books] --> Index[Cached TF-IDF index]
+    Research --> Retrieve[Retrieve up to 3 matching book passages]
+    Index --> Retrieve
+    Retrieve --> Research
     Search --> Evidence[Relevant primary sources and news across the web]
     Evidence --> Report[Report with dates and source links]
     Report --> User
@@ -50,6 +58,40 @@ python -m nepse_agent research "NABIL" --json > nabil-report.json
 Settings may be exported or placed in the repository's `.env` file. Exported
 variables take precedence over values in that file. Both `GEMINI_API_KEY=...`
 and `export GEMINI_API_KEY=...` are accepted in `.env`.
+
+## Local book retrieval and stock assessment
+
+Place PDF books directly in the repository's `training_books/` directory.
+The first research request creates `training_books/.rag_index.json`.
+This directory is git-ignored, so provide the books on every installation.
+
+`rag_engine.py` extracts PDF text with `pypdf`, creates page-bounded passages
+of up to 350 words with 50-word overlap, and ranks them using TF-IDF and cosine
+similarity. A research query is expanded with investment-related terms, and
+up to three matching passages are supplied to the model before its web-search
+request. This applies to both provider adapters and all interfaces. The model
+is instructed to use the full stock-analysis scorecard for company reports,
+while other questions retain their requested scope.
+
+SHA-256 book fingerprints detect added, removed or changed PDFs and rebuild the
+cache. `NEPSE_BOOKS_DIR` selects another PDF directory; `NEPSE_BOOK_INDEX`
+selects another index path. The original PDFs and extracted index remain local,
+while selected passage text is sent to the configured model provider.
+
+Pages without usable text are skipped and reported in `BookRAGStore.warnings`
+and `book_status`. Optional macOS OCR is available through
+`BookRAGStore().load_or_build(ocr=True)` and requires Swift. It caches recognized
+English text beside the index without changing the PDFs. See the
+[RAG setup guide](../README.md#rag-analyze-stocks-using-investment-books) for
+copyable inspection, OCR and rebuilding examples.
+
+The current integration injects retrieved passages into the research prompt;
+web research and assessment happen in the same provider request. The model
+generates book references, ratios and the scorecard; these are not independently
+validated by the application. Web citations are preserved in report metadata,
+but retrieved book passages do not yet have a separate JSON citation field.
+If local retrieval fails, the agent logs a warning and continues with web
+research. Check the logs and source passages when reviewing a book-based verdict.
 
 ## Internet search tool and source coverage
 
@@ -185,6 +227,8 @@ For a full company report:
 | Company | Verified symbol, name, sector and instrument type |
 | Market | Latest available quote, trading timestamp, change, volume, market cap, 52-week range |
 | Fundamentals | EPS, P/E, book value, P/B, revenue, profit, ROE, capital and reporting period |
+| Book-based scorecard | Pass / Caution / Fail assessment of profitability, leverage, cash flow and valuation |
+| Investment verdict | Qualified assessment with strengths, risk flags and references to book principles |
 | News | Up to five relevant, distinct stories from the last 30 days, with dates and links |
 | Corporate actions | Cash/bonus dividends, rights, book close, AGM and mergers when verified |
 | Interpretation | Evidence-based observations, sector-specific metrics and missing/conflicting information |
@@ -197,10 +241,14 @@ and [ShareSansar company profile](https://www.sharesansar.com/company/NABIL).
 ## How it works and how to extend it
 
 - `agent.py` contains the research instructions, registered internet search tools,
-  provider calls and citation renderers. The instructions select the research
-  approach and relevant answer sections from the query. Gemini's grounding metadata maps claims
+  book-context injection, provider calls and citation renderers. The instructions
+  select the research approach and relevant answer sections from the query.
+  Gemini's grounding metadata maps claims
   to source URLs; OpenAI's web-search annotations provide the same attribution.
   The research entry point rejects reports with insufficient cited-site coverage.
+- `rag_engine.py` manages local PDF extraction, page-bounded chunks, TF-IDF
+  retrieval, cache freshness and optional OCR. `ocr_books.swift` recognizes
+  scanned pages using macOS PDFKit and Vision.
 - `server.py` exposes the researcher through A2A agent discovery, JSON-RPC
   requests, task updates and report artifacts using A2A SDK 1.2.0.
 - `client.py` demonstrates discovery and a request through the A2A client SDK.
