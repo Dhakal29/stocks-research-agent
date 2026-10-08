@@ -147,24 +147,29 @@ Search both the verified symbol and company name. Relevant sections are:
 - Corporate actions: cash/bonus dividends, rights issues, AGM/book-close dates
   and mergers where verified. Distinguish proposed, approved and paid actions.
   A dividend percentage based on paid-up/face value is not a market-price yield.
-- Fundamental Health & Valuation Analysis (Benjamin Graham / Intelligent Investor & Financial Ratios):
-  Evaluate the company's financial strength and valuation using established value investing principles:
-  1. **Graham Number & Valuation Multiples**:
-     - Graham's rule of thumb: `P/E * P/B <= 22.5`. Calculate this product only when both ratios are verified and meaningful.
-     - Graham Number formula: `sqrt(22.5 * EPS * Book Value per share)`. Use verified positive EPS and book value for comparable periods and label it a rule-of-thumb benchmark, not proven intrinsic value.
-  2. **Earnings Quality & Multiple**:
-     - Compare P/E with dated, sourced sector peers. Do not assume an industry average or call a company undervalued without supporting evidence.
-  3. **Financial Safety & Equity Cushion**:
-     - P/B vs Book Value: Is the stock trading at a high premium over its tangible book value?
-     - Dividend Yield & Consistency: Has the company provided stable cash/bonus dividends over recent fiscal years?
-  4. **Overall Fundamental Health Verdict**:
-     - When evidence is sufficient, give a qualified assessment: **[FUNDAMENTALLY STRONG]**, **[MODERATE / FAIR]**, or **[FUNDAMENTALLY WEAK / HIGH SPECULATION]**. Otherwise state **[INSUFFICIENT VERIFIED DATA]**.
-     - Provide a bulleted rationale citing: Profitability, Valuation buffer (Margin of Safety), and Risk flags (e.g., negative earnings, excessive multiples, lack of dividend stability).
-- Interpretation and gaps: explain the evidence and label your inferences.
-  Include sector metrics when available: NPL, capital adequacy and distributable
-  profit for banks; project capacity, generation status and debt for hydropower;
-  premiums, claims and solvency for insurers. Do not imply valuation alone proves
-  a stock is cheap or guarantees returns.
+- Fundamental Health, Due Diligence & Valuation Analysis (Grounding with Training Books & Financial Ratios):
+  Apply the Equity Research Due Diligence Checklist and Valuation principles extracted from our training books (Module 3 Fundamental Analysis & Financial Overview):
+  1. **Training Books Due Diligence Checklist**:
+     - **Revenue & PAT Growth**: Is Net Profit growth consistent with revenue and operational growth?
+     - **EPS Consistency**: Has EPS grown in line with net profits, or has excessive equity dilution eroded per-share earnings?
+     - **Gross / Operating Profit Margin (GPM / OPM)**: Check operational profitability (benchmark > 20% for manufacturing/commercial firms; check net interest margin for BFIs).
+     - **Debt & Leverage Levels**: Check Debt-to-Equity and Interest Coverage Ratio (> 2.5x). Highly leveraged businesses with heavy finance costs present elevated risk.
+     - **Cash Flow from Operations (CFO)**: Check whether cash flow from operations is positive. Disparity where Net Profit rises but CFO is consistently negative or weak indicates receivables stress or low-quality earnings.
+     - **Return on Equity (ROE / ROCE)**: Benchmark target > 15%-20%. Verify whether high ROE is driven by genuine profitability or dangerous financial leverage.
+  2. **Valuation Multiples & Margin of Safety**:
+     - Graham's rule of thumb: `P/E * P/B <= 22.5`. Calculate when both ratios are verified and positive.
+     - Graham Number benchmark: `sqrt(22.5 * EPS * Book Value per share)`. Compare against current market price to measure Margin of Safety.
+     - Relative Multiple: Compare P/E and P/B with dated industry/peer metrics.
+  3. **Overall Investment Decision Verdict**:
+     - Provide a clear, bold decision verdict based on the training book's criteria:
+       * **[INVESTMENT GRADE / ATTRACTIVE]**: Demonstrates high ROE, healthy/manageable leverage, positive cash flow, and fair valuation with Margin of Safety.
+       * **[MODERATE / FAIR VALUE (HOLD)]**: Sound fundamental business, but currently fully valued or facing moderate sector headwinds.
+       * **[AVOID / HIGH SPECULATION]**: Negative or deteriorating earnings, excessive debt/financial leverage, negative operating cash flows, or unjustified high multiples.
+       * **[INSUFFICIENT VERIFIED DATA]**: If critical metrics (audited reports, book values, debt figures) are unavailable.
+     - Provide a structured scorecard highlighting:
+       * **Key Positives (Strengths)**
+       * **Key Risks & Red Flags (Weaknesses)**
+       * **Knowledge Reference**: Explicitly cite the training book principles (e.g., *Module 3: Chapter 12 Due Diligence Checklist*, *Chapter 9/10 Ratio Analysis*, *Chapter 14 Margin of Safety*).
 
 Every factual claim, financial figure and news item must have an inline web
 citation. Use only retrieved evidence, not model memory, for current facts.
@@ -426,9 +431,29 @@ class NepseResearchAgent:
         except ValueError as exc:
             raise ResearchError("NEPSE_MIN_SITES must be an integer between 2 and 10.") from exc
 
-    def _search_instructions(self, researched_at: str, follow_up: str = "") -> str:
+    def _search_instructions(self, researched_at: str, follow_up: str = "", query: str = "") -> str:
+        rag_context = ""
+        try:
+            from nepse_agent.rag_engine import get_rag_store
+            store = get_rag_store()
+            rag_query = f"{query} investment due diligence checklist valuation ratios return on equity debt"
+            retrieved_chunks = store.retrieve(rag_query, top_k=3)
+            if retrieved_chunks:
+                context_snippets = "\n\n".join(
+                    f"[{c.book_title} | {c.chapter} (Page {c.page_number})]:\n{c.content}"
+                    for c in retrieved_chunks
+                )
+                rag_context = (
+                    f"\n\n--- RELEVANT TRAINING BOOK KNOWLEDGE (Reference this framework for investment verdict) ---\n"
+                    f"{context_snippets}\n"
+                    f"-------------------------------------------------------------------------------------------\n"
+                )
+        except Exception as e:
+            logger.warning("Could not retrieve RAG knowledge: %s", e)
+
         return (
             RESEARCH_INSTRUCTIONS
+            + rag_context
             + f"\nCurrent research time: {researched_at} (Asia/Kathmandu).\n"
             + f"Use the internet search tool and cite at least {self.min_sites} distinct publisher sites.\n"
             + "Choose search queries from the user's question, requested market and timeframe. "
@@ -443,6 +468,7 @@ class NepseResearchAgent:
             "If enough sources are unavailable, explain the gap without inventing citations.\n"
             + follow_up
         )
+
 
 
     async def _resolve_grounding_domains(self, data: dict) -> None:
