@@ -14,35 +14,44 @@ st.caption("Ask for today's market summary, company research, comparisons, news,
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+def render_clean_report(markdown_text: str) -> None:
+    # Separate the main analysis from raw cited source lists to keep the UI clean
+    if "## Cited sources" in markdown_text:
+        main_content, sources_content = markdown_text.split("## Cited sources", 1)
+        st.markdown(main_content.strip())
+        with st.expander("🔗 View Web Sources & Citations", expanded=False):
+            st.markdown(sources_content.strip())
+    else:
+        st.markdown(markdown_text)
+
 # Display previous chat messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        render_clean_report(msg["content"])
         if msg.get("search_suggestions_html"):
             html(msg["search_suggestions_html"], height=120, scrolling=True)
 
 # User prompt
-prompt = st.chat_input("Ask a question, e.g. Give me today's market summary")
+prompt = st.chat_input("Ask a question, e.g. Analyze NABIL based on fundamental books")
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Researching your question across web sources..."):
+        with st.spinner("Analyzing stock fundamentals against training books..."):
             try:
                 # Try calling via A2A Server first
                 try:
                     report_data = asyncio.run(ask_agent_report(prompt, "http://127.0.0.1:10000"))
                 except AgentUnavailableError:
-                    st.info("The A2A server is unavailable; running research directly.")
                     report_data = asdict(asyncio.run(NepseResearchAgent().research(prompt)))
             except (ResearchError, ValueError) as exc:
                 st.error(str(exc))
             else:
                 response = report_data["markdown"]
                 suggestions = report_data.get("search_suggestions_html", "")
-                st.markdown(response)
+                render_clean_report(response)
                 if suggestions:
                     html(suggestions, height=120, scrolling=True)
                 st.session_state.messages.append({

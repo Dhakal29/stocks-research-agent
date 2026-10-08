@@ -125,59 +125,30 @@ GENERAL OR ECONOMIC QUESTION:
   NEPSE or company sections onto an unrelated question.
 
 FULL COMPANY REPORT (bare symbol or explicit request for comprehensive research):
-First verify the exact symbol, company name, instrument type and sector through
-exchange listings or public company profiles. Do not confuse ordinary shares
-with promoter shares, debentures, funds or subsidiaries. If the symbol cannot
-be verified, explain the ambiguity rather than inventing a company or figures.
-Search both the verified symbol and company name. Relevant sections are:
-- Company: verified name, symbol, sector and instrument type.
-- Market snapshot: latest price with currency (NPR for NEPSE), change, volume, market capitalization,
-  52-week range, and actual last-traded/as-of timestamp, when available. If the
-  source's timezone is absent, say so. Never label an older quote as today's or
-  as live. The research timestamp is different from a quote timestamp.
-- Fundamentals: a table with metric, value/unit, fiscal year/quarter, and source.
-  Seek EPS, P/E, book value per share, P/B, revenue, net profit, paid-up capital,
-  ROE and comparable-period profit growth. Record whether EPS is annualized or
-  trailing, if disclosed; otherwise mark its basis as unknown. P/E for zero or
-  negative EPS is not meaningful. Keep BS fiscal years and AD dates explicitly
-  labeled; do not guess calendar conversions. Distinguish audited from unaudited
-  statements. Never mix reporting periods without explaining the difference.
-- Recent news: use the dated, deduplicated news guide above. If no recent items
-  are found, say so.
-- Corporate actions: cash/bonus dividends, rights issues, AGM/book-close dates
-  and mergers where verified. Distinguish proposed, approved and paid actions.
-  A dividend percentage based on paid-up/face value is not a market-price yield.
-- Fundamental Health, Due Diligence & Valuation Analysis (Grounding with Training Books & Financial Ratios):
-  Apply the Equity Research Due Diligence Checklist and Valuation principles extracted from our training books (Module 3 Fundamental Analysis & Financial Overview):
-  1. **Training Books Due Diligence Checklist**:
-     - **Revenue & PAT Growth**: Is Net Profit growth consistent with revenue and operational growth?
-     - **EPS Consistency**: Has EPS grown in line with net profits, or has excessive equity dilution eroded per-share earnings?
-     - **Gross / Operating Profit Margin (GPM / OPM)**: Check operational profitability (benchmark > 20% for manufacturing/commercial firms; check net interest margin for BFIs).
-     - **Debt & Leverage Levels**: Check Debt-to-Equity and Interest Coverage Ratio (> 2.5x). Highly leveraged businesses with heavy finance costs present elevated risk.
-     - **Cash Flow from Operations (CFO)**: Check whether cash flow from operations is positive. Disparity where Net Profit rises but CFO is consistently negative or weak indicates receivables stress or low-quality earnings.
-     - **Return on Equity (ROE / ROCE)**: Benchmark target > 15%-20%. Verify whether high ROE is driven by genuine profitability or dangerous financial leverage.
-  2. **Valuation Multiples & Margin of Safety**:
-     - Graham's rule of thumb: `P/E * P/B <= 22.5`. Calculate when both ratios are verified and positive.
-     - Graham Number benchmark: `sqrt(22.5 * EPS * Book Value per share)`. Compare against current market price to measure Margin of Safety.
-     - Relative Multiple: Compare P/E and P/B with dated industry/peer metrics.
-  3. **Overall Investment Decision Verdict**:
-     - Provide a clear, bold decision verdict based on the training book's criteria:
-       * **[INVESTMENT GRADE / ATTRACTIVE]**: Demonstrates high ROE, healthy/manageable leverage, positive cash flow, and fair valuation with Margin of Safety.
-       * **[MODERATE / FAIR VALUE (HOLD)]**: Sound fundamental business, but currently fully valued or facing moderate sector headwinds.
-       * **[AVOID / HIGH SPECULATION]**: Negative or deteriorating earnings, excessive debt/financial leverage, negative operating cash flows, or unjustified high multiples.
-       * **[INSUFFICIENT VERIFIED DATA]**: If critical metrics (audited reports, book values, debt figures) are unavailable.
-     - Provide a structured scorecard highlighting:
-       * **Key Positives (Strengths)**
-       * **Key Risks & Red Flags (Weaknesses)**
-       * **Knowledge Reference**: Explicitly cite the training book principles (e.g., *Module 3: Chapter 12 Due Diligence Checklist*, *Chapter 9/10 Ratio Analysis*, *Chapter 14 Margin of Safety*).
+Keep the report clean, executive-level, structured, and easy to read. Avoid verbose essay text. Present data in clean tables and concise bullet points.
+Required Sections:
+1. **Executive Snapshot**:
+   - Company Name, Ticker, Sector, Current Market Price (NPR), 52-week range, and Market Cap.
+2. **Key Financial Fundamentals (Table)**:
+   - Present verified metrics: P/E, P/B, EPS (NPR), Book Value (NPR), ROE (%), Operating Margin / NIM (%), and Dividend Yield.
+3. **Training Books Due Diligence Scorecard (Pass / Caution / Fail)**:
+   - Evaluate against the book's framework (*Module 3 Fundamental Analysis*):
+     * *Profitability & ROE*: Benchmark >= 15-20%.
+     * *Financial Leverage & Debt*: Debt-to-Equity and Interest Coverage.
+     * *Cash Flow vs Accounting Profit*: Positive Operating Cash Flow backing net profit.
+     * *Valuation Cushion (Graham Test)*: `P/E * P/B <= 22.5` & Graham Number comparison with current price.
+4. **Investment Verdict & Rationales**:
+   - Clear Tag: **[INVESTMENT GRADE / ATTRACTIVE]**, **[MODERATE / FAIR VALUE (HOLD)]**, or **[AVOID / HIGH RISK]**.
+   - **Why & How (Rationale based on Books)**: Explain the *exact reason* why this verdict was reached. Reference the specific book principles (e.g., *Module 3: Chapter 13 Due Diligence / Chapter 14 Margin of Safety*).
+   - **Key Strengths** (2-3 concise bullets).
+   - **Key Red Flags / Concerns** (2-3 concise bullets).
+5. **Recent Corporate Actions / Catalysts**:
+   - Recent dividends, quarterly results, or significant announcements (dated).
 
 Every factual claim, financial figure and news item must have an inline web
 citation. Use only retrieved evidence, not model memory, for current facts.
-Mark unavailable, paywalled, undated or unverifiable fields explicitly. Never
-guess missing metrics, dates or source URLs. Keep the report focused on the
-user's query. Do not claim to have read the entire internet; describe only the
-evidence actually retrieved. Do not add a sources section; the application
-appends cited URLs.
+Mark unavailable or unverifiable fields explicitly. Never guess missing metrics.
+Keep the output concise, clean, and professional. Do not add a sources section; the application appends cited URLs.
 """.strip()
 
 
@@ -606,6 +577,20 @@ class NepseResearchAgent:
                         report, searched_urls=list(dict.fromkeys(searched_urls)),
                         search_queries=list(dict.fromkeys(search_queries)),
                     )
+                    # Extract and log decision verdict & book reasoning for clear observability
+                    verdict_match = re.search(r"(\[(?:INVESTMENT GRADE|MODERATE / FAIR VALUE|AVOID / HIGH RISK|INSUFFICIENT VERIFIED DATA)[^\]]*\])", report.markdown, re.IGNORECASE)
+                    verdict_label = verdict_match.group(1) if verdict_match else "[EVALUATED]"
+                    logger.info("================== INVESTMENT ANALYSIS VERDICT ==================")
+                    logger.info("Ticker/Query: %r", query)
+                    logger.info("Verdict: %s", verdict_label)
+                    
+                    # Log summary of reasons
+                    rationale_section = re.search(r"(###? .*?(?:Investment Verdict|Rationale|Why & How).*?\n)(.*?)(?=\n###?|\Z)", report.markdown, re.DOTALL | re.IGNORECASE)
+                    if rationale_section:
+                        clean_rationale = "\n".join(line.strip() for line in rationale_section.group(2).split("\n") if line.strip() and not line.startswith("http"))[:600]
+                        logger.info("Rationale based on Books:\n%s", clean_rationale)
+                    logger.info("==================================================================")
+
                     logger.info(
                         "[research] Research completed for query: %r with %d searched URLs and %d search queries.",
                         query, len(report.searched_urls), len(report.search_queries),
