@@ -81,7 +81,9 @@ def test_narrow_coverage_triggers_one_targeted_search_then_succeeds():
     prompts = []
 
     def respond(request):
-        prompts.append(json.loads(request.content)["systemInstruction"]["parts"][0]["text"])
+        payload = json.loads(request.content)
+        prompts.append(payload["systemInstruction"]["parts"][0]["text"])
+        assert payload["tools"] == [{"googleSearch": {}}]
         data = grounded_response()
         if len(prompts) == 1:
             data["candidates"][0]["groundingMetadata"]["groundingSupports"] = data["candidates"][0]["groundingMetadata"]["groundingSupports"][:1]
@@ -160,18 +162,143 @@ def test_google_redirects_with_domain_titles_do_not_require_extra_requests():
     assert len(asyncio.run(google_agent(respond).research("NABIL")).source_domains) == 2
 
 
-def test_gemini_api_error_does_not_retry_or_expose_key():
+@pytest.mark.parametrize("violations,hint", [
+    ([], "rate limit or quota is still exceeded"),
+    ([{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "quotaValue": "5"}], "rate limit was exceeded"),
+])
+def test_gemini_429_retries_without_exposing_provider_body(violations, hint, monkeypatch, caplog):
+    from unittest.mock import AsyncMock
+    calls = []
+    sleep = AsyncMock()
+    monkeypatch.setattr("nepse_agent.agent.asyncio.sleep", sleep)
+    monkeypatch.setattr("nepse_agent.agent.random.uniform", lambda *args: 0.0)
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(429, json={"error": {
+            "code": 429, "message": "private-body test-key", "status": "RESOURCE_EXHAUSTED",
+            "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": violations}],
+        }})
+
+    with caplog.at_level("WARNING", logger="nepse_agent.agent"):
+        with pytest.raises(ResearchError, match="HTTP 429") as error:
+            asyncio.run(google_agent(respond).research("NABIL"))
+    assert len(calls) == 3
+    assert [call.args[0] for call in sleep.await_args_list] == [5.0, 10.0]
+    assert hint in str(error.value)
+    assert "Google AI Studio" in str(error.value)
+    assert "private-body" not in str(error.value)
+    assert "test-key" not in str(error.value)
+    assert "[Gemini retry] HTTP 429" in caplog.text
+    assert "private-body" not in caplog.text
+    assert "test-key" not in caplog.text
+
+
+@pytest.mark.parametrize("headers,details,expected_delay", [
+    ({}, [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "12.5s"}], 12.5),
+    ({"Retry-After": "17"}, [], 17.0),
+    ({"Retry-After": "17"}, [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "12.5s"}], 17.0),
+    ({"Date": "Fri, 09 Oct 2026 06:30:00 GMT", "Retry-After": "Fri, 09 Oct 2026 06:30:11 GMT"}, [], 11.0),
+    ({"Retry-After": "NaN"}, [None, "invalid", {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "invalid"}], 5.0),
+    ({}, [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "60s"}], 60.0),
+    ({"Retry-After": "-3"}, [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "-1s"}], 5.0),
+])
+def test_gemini_rate_limit_honors_wait_hint_and_recovers(headers, details, expected_delay, monkeypatch):
+    from unittest.mock import AsyncMock
+    sleep = AsyncMock()
+    monkeypatch.setattr("nepse_agent.agent.asyncio.sleep", sleep)
+    monkeypatch.setattr("nepse_agent.agent.random.uniform", lambda *args: 0.0)
+    calls = []
+
+    def respond(request):
+        calls.append(json.loads(request.content))
+        if len(calls) == 1:
+            return httpx.Response(429, headers=headers, json={"error": {
+                "code": 429, "status": "RESOURCE_EXHAUSTED", "message": "private-body test-key",
+                "details": details,
+            }})
+        return httpx.Response(200, json=grounded_response())
+
+    report = asyncio.run(google_agent(respond).research("UNHPL"))
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    sleep.assert_awaited_once_with(expected_delay)
+    assert report.query == "UNHPL"
+    assert report.source_domains == ["merolagani.com", "sharesansar.com"]
+
+
+@pytest.mark.parametrize("violations,message,hint,kind", [
+    ([{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier", "quotaValue": "20"}], "private-body test-key", "daily quota reset", "daily_quota"),
+    ([{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier", "quotaValue": "0"}], "private-body test-key", "zero available quota", "zero_quota"),
+    ([{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}], "Quota exceeded; limit: 0, private-body test-key", "zero available quota", "zero_quota"),
+    ([{"description": "Daily Limit for read operations exceeded"}], "private-body test-key", "daily quota reset", "daily_quota"),
+])
+def test_gemini_daily_and_zero_quota_stop_without_retry(violations, message, hint, kind, monkeypatch, caplog):
+    from unittest.mock import AsyncMock
+    sleep = AsyncMock()
+    monkeypatch.setattr("nepse_agent.agent.asyncio.sleep", sleep)
     calls = []
 
     def respond(request):
         calls.append(request)
-        return httpx.Response(429, json={"error": {"code": 429, "message": "private-body test-key", "status": "RESOURCE_EXHAUSTED"}})
+        return httpx.Response(429, json={"error": {
+            "code": 429, "status": "RESOURCE_EXHAUSTED", "message": message,
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": violations},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "9s"},
+            ],
+        }})
 
-    with pytest.raises(ResearchError, match="HTTP 429") as error:
-        asyncio.run(google_agent(respond).research("NABIL"))
+    with caplog.at_level("WARNING", logger="nepse_agent.agent"):
+        with pytest.raises(ResearchError, match=hint) as error:
+            asyncio.run(google_agent(respond).research("UNHPL"))
     assert len(calls) == 1
+    sleep.assert_not_awaited()
+    assert "HTTP 429" in str(error.value)
+    assert "Google AI Studio" in str(error.value)
+    assert f"kind={kind}; no automatic retry" in caplog.text
+    assert "private-body" not in str(error.value) + caplog.text
+    assert "test-key" not in str(error.value) + caplog.text
+
+
+@pytest.mark.parametrize("headers,details,wait", [
+    ({"Retry-After": "90"}, [], 90),
+    ({}, [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "125.5s"}], 126),
+])
+@pytest.mark.parametrize("status", [429, 503])
+def test_gemini_long_wait_is_reported_without_retrying_early(headers, details, wait, status, monkeypatch):
+    from unittest.mock import AsyncMock
+    sleep = AsyncMock()
+    monkeypatch.setattr("nepse_agent.agent.asyncio.sleep", sleep)
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(status, headers=headers, json={"error": {
+            "code": status, "status": "RESOURCE_EXHAUSTED" if status == 429 else "UNAVAILABLE",
+            "message": "private-body test-key", "details": details,
+        }})
+
+    with pytest.raises(ResearchError, match=f"at least {wait} seconds") as error:
+        asyncio.run(google_agent(respond).research("UNHPL"))
+    assert len(calls) == 1
+    sleep.assert_not_awaited()
     assert "private-body" not in str(error.value)
-    assert "test-key" not in str(error.value)
+
+
+def test_gemini_rate_limit_wait_shares_the_generation_deadline(monkeypatch):
+    monkeypatch.setattr("nepse_agent.agent.GEMINI_REQUEST_TIMEOUT", 0.02)
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(429, headers={"Retry-After": "20"}, json={"error": {
+            "code": 429, "status": "RESOURCE_EXHAUSTED", "message": "rate limit",
+        }})
+
+    with pytest.raises(ResearchError, match="including retries"):
+        asyncio.run(google_agent(respond).research("UNHPL"))
+    assert len(calls) == 1
 
 
 def test_provider_and_site_configuration(monkeypatch):
@@ -270,7 +397,8 @@ def test_gemini_generation_deadline_cancels_slow_request(monkeypatch):
     assert cancelled == [True]
 
 
-def test_gemini_503_in_assessment_retries_only_that_stage(monkeypatch):
+@pytest.mark.parametrize("status", [429, 503])
+def test_gemini_transient_failure_in_assessment_retries_only_that_stage(status, monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from nepse_agent.rag_engine import DocumentChunk
@@ -287,16 +415,16 @@ def test_gemini_503_in_assessment_retries_only_that_stage(monkeypatch):
     )
     prompts = []
     def respond(request):
-        prompts.append(json.loads(request.content)["systemInstruction"]["parts"][0]["text"])
+        payload = json.loads(request.content)
+        prompts.append(payload["systemInstruction"]["parts"][0]["text"])
+        assert bool(payload.get("tools")) is (len(prompts) == 1)
         if len(prompts) == 2:
-            return httpx.Response(503, json={"error": {"code": 503, "message": "temporary overload", "status": "UNAVAILABLE"}})
+            return httpx.Response(status, json={"error": {"code": status, "message": "temporary provider failure", "status": "RESOURCE_EXHAUSTED" if status == 429 else "UNAVAILABLE"}})
         data = grounded_response()
         if len(prompts) == 3:
             candidate = data["candidates"][0]
-            candidate["content"]["parts"][-1]["text"] += " [BOOK:actual-id]"
-            candidate["groundingMetadata"]["groundingSupports"][-1]["segment"]["endIndex"] = len(
-                candidate["content"]["parts"][-1]["text"].encode("utf-8")
-            )
+            candidate["content"]["parts"][-1]["text"] += " [BOOK:1] [WEB:1] [WEB:2]"
+            candidate.pop("groundingMetadata")
         return httpx.Response(200, json=data)
     report = asyncio.run(google_agent(respond).research("unhpl"))
     assert len(prompts) == 3
@@ -305,3 +433,37 @@ def test_gemini_503_in_assessment_retries_only_that_stage(monkeypatch):
     assert "WEB RESEARCH RESPONSE" in prompts[1]
     assert len(retrievals) == 1
     assert "[Book.pdf | Cash flow | PDF page 9]" in report.markdown
+
+
+def test_analysis_reuses_google_redirect_citations_without_new_grounding(monkeypatch):
+    monkeypatch.setenv("NEPSE_RAG_WEB_FIRST", "1")
+    calls = []
+    urls = [f"https://vertexaisearch.cloud.google.com/grounding-api-redirect/fixture{index}" for index in range(2)]
+
+    def respond(request):
+        assert request.method == "POST"
+        payload = json.loads(request.content)
+        calls.append(payload)
+        if len(calls) == 1:
+            assert payload["tools"] == [{"googleSearch": {}}]
+            data = grounded_response()
+            chunks = data["candidates"][0]["groundingMetadata"]["groundingChunks"]
+            for index, title in enumerate(["merolagani.com", "sharesansar.com"]):
+                chunks[index]["web"].update(uri=urls[index], title=title)
+            return httpx.Response(200, json=data)
+        assert not payload.get("tools")
+        return httpx.Response(200, json={"candidates": [{
+            "finishReason": "STOP", "content": {"role": "model", "parts": [
+                {"text": "Private fixture reasoning [WEB:999]", "thought": True},
+                {"text": "Assessment of the supplied facts [WEB:1] [WEB:2]."},
+            ]},
+        }]})
+
+    report = asyncio.run(google_agent(respond).research("unhpl"))
+    assert len(calls) == 2
+    assert {source.url for source in report.cited_sources} == set(urls)
+    assert report.source_domains == ["merolagani.com", "sharesansar.com"]
+    assert report.search_queries == ["NABIL site:merolagani.com", "NABIL site:sharesansar.com"]
+    assert report.search_suggestions_html == "<div>Google Search suggestions fixture</div>"
+    assert "Private fixture reasoning" not in report.markdown
+    assert "[WEB:" not in report.markdown

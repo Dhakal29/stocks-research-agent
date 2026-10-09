@@ -319,6 +319,51 @@ def test_cosine_vector_search_matches_paraphrase_filters_noise_and_logs_text(tmp
     assert store.retrieve("   ") == []
 
 
+def test_semantic_index_drops_isolated_page_numbers_and_headings(tmp_path, monkeypatch):
+    store, _ = _fixture_store(tmp_path, monkeypatch, texts=[_CASH_TEXT + "\n\n9"])
+    store.load_or_build()
+    assert [chunk.content for chunk in store.chunks] == [_CASH_TEXT]
+    assert store._semantic_chunks("9") == []
+    assert store._semantic_chunks("Chapter 2") == []
+
+
+def test_retrieval_backfills_after_rejecting_a_high_similarity_page_number(tmp_path, monkeypatch, caplog):
+    from nepse_agent.rag_engine import DocumentChunk
+    store, embedder = _fixture_store(tmp_path, monkeypatch, texts=[_CASH_TEXT])
+    store.load_or_build()
+    embedder.vectors["9"] = [1.0, 0.0, 0.0]
+    embedder.vectors[_CASH_TEXT] = [0.9, 0.1, 0.0]
+    store.chunks.insert(0, DocumentChunk("page-number", "book.pdf", "Chapter 2", 10, "9"))
+    store._chunks_by_id = {chunk.chunk_id: chunk for chunk in store.chunks}
+    store._index_vectors(store.chunks, rebuild=True)
+    with caplog.at_level("INFO", logger="nepse_agent.rag_engine"):
+        result = store.retrieve(_SEMANTIC_QUERY, top_k=1)
+    assert len(result) == 1
+    assert result[0].content == _CASH_TEXT
+    assert "id=page-number reason=short_or_nontext" in caplog.text
+
+
+def test_analysis_retrieval_prioritizes_framework_and_cleans_source_urls(tmp_path, monkeypatch):
+    from nepse_agent.rag_engine import DocumentChunk
+    store, _ = _fixture_store(tmp_path, monkeypatch)
+    queries = []
+    def retrieve(query, top_k):
+        queries.append(query)
+        return [DocumentChunk(str(len(queries)), "book.pdf", "Framework", 1, query, 0.8)]
+    monkeypatch.setattr(store, "retrieve", retrieve)
+    evidence = (
+        "Researched at: 2026-10-09T12:24:31+05:45 (Asia/Kathmandu)\n\n"
+        "Union Hydropower Limited has operating cash flow and valuation concerns "
+        "[source](https://vertexaisearch.cloud.google.com/grounding-api-redirect/long-opaque-token)."
+    )
+    chunks = store.retrieve_for_analysis("unhpl", evidence=evidence, top_k=8)
+    assert "unhpl" not in queries
+    assert not any("https://" in query or "long-opaque-token" in query or "Researched at:" in query for query in queries)
+    selected_text = " ".join(chunk.content for chunk in chunks)
+    for concept in ["operating cash flow", "financial leverage", "intrinsic value", "return on equity", "due diligence"]:
+        assert concept in selected_text
+
+
 def test_persisted_vectors_reload_without_reembedding_books(tmp_path, monkeypatch):
     store, _ = _fixture_store(tmp_path, monkeypatch)
     store.load_or_build()
@@ -358,9 +403,10 @@ def test_missing_vector_database_recovers_from_cached_passages(tmp_path, monkeyp
     assert recovered.retrieve(_SEMANTIC_QUERY)[0].content == _CASH_TEXT
 
 
-def test_legacy_index_migration_preserves_ocr_and_page_references(tmp_path, monkeypatch):
+@pytest.mark.parametrize("version", [2, 3])
+def test_legacy_index_migration_preserves_ocr_and_page_references(version, tmp_path, monkeypatch):
     store, _ = _fixture_store(tmp_path, monkeypatch, texts=[_CASH_TEXT, ""])
-    (tmp_path / ".rag_index.json").write_text(json.dumps({"version": 2, "ocr_enabled": True}))
+    (tmp_path / ".rag_index.json").write_text(json.dumps({"version": version, "ocr_enabled": True}))
     calls = []
     def ocr(path, digest, pages):
         calls.append(pages)
@@ -371,7 +417,7 @@ def test_legacy_index_migration_preserves_ocr_and_page_references(tmp_path, monk
     assert {chunk.page_number for chunk in store.chunks} == {1, 2}
     assert store.book_status[0]["ocr_pages"] == [2]
     manifest = json.loads((tmp_path / ".rag_index.json").read_text())
-    assert manifest["version"] == 3
+    assert manifest["version"] == 4
     assert manifest["ocr_enabled"] is True
 
 
@@ -389,23 +435,51 @@ def test_web_response_sections_and_exact_vector_queries_are_logged(tmp_path, mon
 
 @pytest.mark.parametrize("text", [
     "[BOOK:invented-chunk]",
+    "[BOOK:2]",
+    "[BOOK:15]",  # A PDF page number is not a citation ID.
+    "[BOOK:1,2]",  # Every ID in a grouped reference must be supplied.
+    "[BOOK:1, 999] [BOOK:1]",
+    "[BOOK:1",
+    "[BOOK:] [BOOK:1]",
     "[Other.pdf | Chapter 14 | Page 55]",
     "Book-based rationale without any citation.",
 ])
-def test_unretrieved_or_missing_book_citations_are_rejected(text):
+def test_unretrieved_or_missing_book_citations_are_rejected(text, caplog):
     from nepse_agent.agent import EvidenceError, _render_book_citations
     from nepse_agent.rag_engine import DocumentChunk
     chunk = DocumentChunk("real-id", "Book.pdf", "Chapter 9", 15, _CASH_TEXT)
-    with pytest.raises(EvidenceError):
+    with pytest.raises(EvidenceError, match=r"Allowed book citation markers for this request: \[BOOK:1\]"):
         _render_book_citations(text, [chunk], required=True)
+    if text == "[BOOK:2]":
+        assert "Unknown book IDs: '2'" in caplog.text
+        assert "[BOOK:1]" in caplog.text
 
 
-def test_verified_book_markers_render_exact_metadata():
+@pytest.mark.parametrize("marker", ["[BOOK:1]", "[BOOK: 1 ]", "[BOOK:real-id]"])
+def test_verified_book_markers_render_exact_metadata(marker):
     from nepse_agent.agent import _render_book_citations
     from nepse_agent.rag_engine import DocumentChunk
     chunk = DocumentChunk("real-id", "Book.pdf", "Chapter 9", 15, _CASH_TEXT)
-    result = _render_book_citations("Cash flow reasoning [BOOK:real-id]", [chunk], required=True)
+    result = _render_book_citations(f"Cash flow reasoning {marker}", [chunk], required=True)
     assert result == "Cash flow reasoning [Book.pdf | Chapter 9 | PDF page 15]"
+
+
+def test_grouped_book_markers_map_only_to_supplied_passages():
+    from nepse_agent.agent import _render_book_citations
+    from nepse_agent.rag_engine import DocumentChunk
+    chunks = [
+        DocumentChunk("Module 3_Fundamental Analysis.pdf_131_1", "Book.pdf", "Due Diligence", 131, _CASH_TEXT),
+        DocumentChunk("Module 3_Fundamental Analysis.pdf_145_2", "Book.pdf", "ROE", 145, _CASH_TEXT),
+    ]
+    result = _render_book_citations("Reasoning [BOOK:2, 1, 2]", chunks, required=True)
+    assert result == "Reasoning [Book.pdf | ROE | PDF page 145] [Book.pdf | Due Diligence | PDF page 131]"
+
+
+@pytest.mark.parametrize("text", ["[BOOK:1]", "[BOOK:original-id]", "[BOOK:]"])
+def test_book_markers_are_rejected_when_no_passages_were_supplied(text):
+    from nepse_agent.agent import EvidenceError, _render_book_citations
+    with pytest.raises(EvidenceError, match="Allowed book citations: NONE"):
+        _render_book_citations(text, [], required=False)
 
 
 @pytest.mark.parametrize("provider", ["gemini", "openai"])
@@ -414,7 +488,8 @@ def test_web_first_analysis_retrieves_from_response_and_exposes_book_sources(pro
     from unittest.mock import Mock
     from nepse_agent.rag_engine import DocumentChunk
     monkeypatch.setenv("NEPSE_RAG_WEB_FIRST", "1")
-    chunk = DocumentChunk("retrieved-id", "Book.pdf", "Cash flow", 3, _CASH_TEXT, 0.85)
+    chunk_id = "Module 3_Fundamental Analysis.pdf_131_1"
+    chunk = DocumentChunk(chunk_id, "Book.pdf", "Cash flow", 3, _CASH_TEXT, 0.85)
     retrievals = []
     def retrieve(query, evidence="", top_k=8):
         retrievals.append((query, evidence))
@@ -425,19 +500,28 @@ def test_web_first_analysis_retrieves_from_response_and_exposes_book_sources(pro
     )
     prompts = []
     first_text = "The verified operating cash flow supports net profit and dividend payments."
-    final_text = "[MODERATE / FAIR VALUE (HOLD)] Cash flow reasoning [BOOK:retrieved-id]."
+    final_text = "[MODERATE / FAIR VALUE (HOLD)] Cash flow reasoning [BOOK:1]. Company evidence [WEB:1] [WEB:2]."
     def respond(request):
         payload = json.loads(request.content)
         instructions = payload["instructions"] if provider == "openai" else payload["systemInstruction"]["parts"][0]["text"]
         prompts.append(instructions)
         text = first_text if len(prompts) == 1 else final_text
+        assert bool(payload.get("tools")) is (len(prompts) == 1)
         if provider == "openai":
             data = provider_response()
             part = data["output"][1]["content"][0]
             part["text"] = text
             for annotation in part["annotations"]:
                 annotation.update(start_index=0, end_index=len(text))
+            if len(prompts) > 1:
+                data["output"] = [data["output"][1]]
+                part["annotations"] = []
+                assert "tool_choice" not in payload
             return httpx.Response(200, json=data)
+        if len(prompts) > 1:
+            return httpx.Response(200, json={"candidates": [{
+                "finishReason": "STOP", "content": {"role": "model", "parts": [{"text": text}]},
+            }]})
         return httpx.Response(200, json={"candidates": [{
             "finishReason": "STOP",
             "content": {"role": "model", "parts": [{"text": text}]},
@@ -462,17 +546,25 @@ def test_web_first_analysis_retrieves_from_response_and_exposes_book_sources(pro
     with caplog.at_level("INFO", logger="nepse_agent"):
         report = SimpleNamespace(**asyncio.run(scenario()))
     assert len(prompts) == 2
-    assert "[BOOK:retrieved-id]" not in prompts[0]
+    assert "[BOOK:1]" not in prompts[0]
     assert "web-evidence stage" in prompts[0]
     assert first_text in prompts[1]
-    assert "[BOOK:retrieved-id]" in prompts[1]
+    assert "[BOOK:1]" in prompts[1]
+    assert "Allowed book citation markers for this request: [BOOK:1]" in prompts[1]
+    assert chunk_id not in prompts[1]
     assert len(retrievals) == 1
     assert first_text in retrievals[0][1]
-    assert report.book_sources[0]["chunk_id"] == "retrieved-id"
+    assert report.book_sources[0]["chunk_id"] == chunk_id
+    assert report.book_sources[0]["citation_id"] == "1"
     assert report.book_sources[0]["similarity_score"] == 0.85
     assert "[Book.pdf | Cash flow | PDF page 3]" in report.markdown
     assert "[RAG model context]" in caplog.text
+    assert f"[RAG citation map] [BOOK:1] -> chunk_id='{chunk_id}'" in caplog.text
+    assert "[BOOK:" not in report.markdown
     assert report.elapsed_seconds == 12.5
+    assert report.source_domains == ["merolagani.com", "sharesansar.com"]
+    assert len(report.search_queries) == (2 if provider == "openai" else 1)
+    assert "[WEB:" not in report.markdown
 
 
 def test_default_web_first_keeps_market_summaries_as_one_search(monkeypatch):
@@ -498,16 +590,19 @@ def test_invented_book_citations_retry_and_never_reach_the_user(recover, monkeyp
     def respond(request):
         payload = json.loads(request.content)
         prompts.append(payload["instructions"])
-        if len(prompts) % 2:
+        if len(prompts) == 1:
             text = "Verified company financial evidence."
         else:
-            book_id = "real-id" if recover and len(prompts) == 4 else "invented"
-            text = f"Financial rationale [BOOK:{book_id}]"
+            book_id = "1" if recover and len(prompts) == 3 else "invented"
+            text = f"Financial rationale [BOOK:{book_id}] [WEB:1] [WEB:2]"
         data = provider_response()
         part = data["output"][1]["content"][0]
         part["text"] = text
         for annotation in part["annotations"]:
             annotation.update(start_index=0, end_index=len(text))
+        if len(prompts) > 1:
+            data["output"] = [data["output"][1]]
+            part["annotations"] = []
         return httpx.Response(200, json=data)
     agent = NepseResearchAgent("fixture-key", "fixture-model", httpx.MockTransport(respond))
     if recover:
@@ -517,5 +612,7 @@ def test_invented_book_citations_retry_and_never_reach_the_user(recover, monkeyp
     else:
         with pytest.raises(EvidenceError, match="book passages that were not retrieved"):
             asyncio.run(agent.research("NABIL"))
-    assert len(prompts) == 4
+    assert len(prompts) == 3
     assert "previous response failed evidence validation" in prompts[-1]
+    assert "Invalid book IDs: 'invented'" in prompts[-1]
+    assert "Allowed book citation markers for this request: [BOOK:1]" in prompts[-1]

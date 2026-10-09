@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BOOKS_DIR = str(Path(__file__).resolve().parent.parent / "training_books")
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
-INDEX_VERSION = 3
+INDEX_VERSION = 4
 
 
 class BookRAGError(RuntimeError):
@@ -96,6 +96,12 @@ def _sentences(text: str, max_words: int) -> list[str]:
     return sentences
 
 
+def _informative_passage(text: str) -> bool:
+    """Page numbers and isolated headings are not useful investment evidence."""
+    words = text.split()
+    return len(words) >= 8 and sum(any(char.isalpha() for char in word) for word in words) >= 6
+
+
 class BookRAGStore:
     def __init__(
         self, books_dir: str | None = None, index_path: str | None = None, *,
@@ -112,8 +118,8 @@ class BookRAGStore:
             self.max_words = int(os.getenv("NEPSE_CHUNK_MAX_WORDS", "180"))
             self.break_percentile = float(os.getenv("NEPSE_SEMANTIC_BREAK_PERCENTILE", "75"))
             self.min_similarity = float(os.getenv("NEPSE_RAG_MIN_SIMILARITY", "0.45"))
-            if not 1 <= self.min_words <= self.max_words <= 400:
-                raise ValueError("Chunk sizes must satisfy 1 <= min <= max <= 400")
+            if not 1 <= self.min_words <= self.max_words <= 400 or self.max_words < 8:
+                raise ValueError("Chunk sizes must satisfy 1 <= min <= max <= 400, with max at least 8")
             if not 0 < self.break_percentile < 100 or not -1 <= self.min_similarity <= 1:
                 raise ValueError("Invalid semantic breakpoint percentile or similarity floor")
         except ValueError as exc:
@@ -195,7 +201,7 @@ class BookRAGStore:
     def _semantic_chunks(self, text: str) -> list[str]:
         sentences = _sentences(text, self.max_words)
         if len(sentences) < 2:
-            return sentences
+            return [sentence for sentence in sentences if _informative_passage(sentence)]
         embeddings = _unit_vectors(self._embedder.embed_documents(sentences), len(sentences))
         # The page's sentence similarity matrix defines boundaries at meaning shifts.
         similarity_matrix = embeddings @ embeddings.T
@@ -214,7 +220,15 @@ class BookRAGStore:
                 current, word_count = [], 0
         if current:
             groups.append(" ".join(current))
-        return groups
+        merged = []
+        for group in groups:
+            if not _informative_passage(group):
+                continue
+            if merged and len(group.split()) < self.min_words and len(merged[-1].split()) + len(group.split()) <= self.max_words:
+                merged[-1] += " " + group
+            else:
+                merged.append(group)
+        return merged
 
     def _ocr_pages(self, file_path: Path, digest: str, pages: list[int]) -> dict[str, str]:
         cache_dir = Path(self.index_path).parent / ".ocr_cache"
@@ -363,7 +377,7 @@ class BookRAGStore:
             try:
                 vector = _unit_vectors(self._embedder.embed_query(query), 1)
                 result = self._collection.query(
-                    query_embeddings=vector.tolist(), n_results=min(top_k, len(self.chunks)),
+                    query_embeddings=vector.tolist(), n_results=min(top_k * 3, len(self.chunks)),
                     include=["distances"],
                 )
                 selected = []
@@ -373,11 +387,16 @@ class BookRAGStore:
                         logger.info("[RAG vector result rejected] id=%s cosine_similarity=%.4f", chunk_id, score)
                         continue
                     chunk = replace(self._chunks_by_id[chunk_id], similarity_score=score)
+                    if not _informative_passage(chunk.content):
+                        logger.info("[RAG vector result rejected] id=%s reason=short_or_nontext", chunk_id)
+                        continue
                     selected.append(chunk)
                     logger.info(
                         "[RAG vector result] id=%s cosine_similarity=%.4f book=%s chapter=%s page=%d\n%s",
                         chunk.chunk_id, score, chunk.book_title, chunk.chapter, chunk.page_number, chunk.content,
                     )
+                    if len(selected) == top_k:
+                        break
                 logger.info("[RAG vector results] Selected %d passages from %s", len(selected), self._collection.name)
                 return selected
             except BookRAGError:
@@ -386,24 +405,11 @@ class BookRAGStore:
                 raise BookRAGError("Semantic vector search failed. Check the embedding model and rebuild the book index.") from exc
 
     def retrieve_for_analysis(self, query: str, evidence: str = "", top_k: int = 8) -> list[DocumentChunk]:
-        """Search the question, evidence sections and several investing concepts."""
+        """Prioritize investment methods, then search meaningful evidence sections."""
         if not isinstance(top_k, int) or not 1 <= top_k <= 20:
             raise ValueError("top_k must be between 1 and 20.")
-        topics = [query]
-        if evidence:
-            logger.info("[RAG evidence input] Web response used to construct vector queries:\n%s", evidence)
-            # Separate short sections avoid silently sending an entire report into
-            # an embedding model's limited context window.
-            body = evidence.split("## Cited sources", 1)[0]
-            sections = re.split(r"\n#{1,6}\s|\n\s*\n", body)
-            for section in sections:
-                words = section.split()
-                if len(words) >= 8:
-                    for start in range(0, len(words), self.max_words):
-                        topics.append(" ".join(words[start:start + self.max_words]))
-            topics = topics[:9]
-        if re.search(r"\b(bank|banking|insurance|hydropower)\b", query + " " + evidence, re.IGNORECASE):
-            topics.append("Sector-specific analysis of banks, insurance or hydropower: relevant profitability and financial risk measures.")
+        # A ticker alone has no investment meaning and can match page numbers.
+        topics = [] if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{1,11}", query.strip()) else [query]
         topics.extend([
             "Assess business quality, competitive advantage and management using an investment due diligence checklist.",
             "Evaluate sustainable earnings growth, profitability and return on equity.",
@@ -411,6 +417,24 @@ class BookRAGStore:
             "Assess financial leverage, debt repayment and interest coverage.",
             "Compare price to intrinsic value, growth and peers; assess valuation and margin of safety.",
         ])
+        if re.search(r"\b(bank|banking|insurance|hydro\s*power)\b", query + " " + evidence, re.IGNORECASE):
+            topics.append("Sector-specific analysis of banks, insurance or hydropower: relevant profitability and financial risk measures.")
+        if evidence:
+            logger.info("[RAG evidence input] Web response used to construct vector queries:\n%s", evidence)
+            # Separate short sections avoid silently sending an entire report into
+            # an embedding model's limited context window.
+            body = evidence.split("## Cited sources", 1)[0]
+            body = re.sub(r"\[[^\]\n]*\]\(https?://[^\s)]*\)", "", body)
+            body = re.sub(r"https?://\S+", "", body)
+            body = re.sub(r"(?m)^Researched at:.*$", "", body)
+            sections = re.split(r"\n#{1,6}\s|\n\s*\n", body)
+            evidence_topics = []
+            for section in sections:
+                words = section.split()
+                if len(words) >= 8:
+                    for start in range(0, len(words), self.max_words):
+                        evidence_topics.append(" ".join(words[start:start + self.max_words]))
+            topics.extend(evidence_topics[:8])
         ranked = [self.retrieve(topic, top_k=min(top_k, 4)) for topic in dict.fromkeys(topics) if topic.strip()]
         selected, seen = [], set()
         for rank in range(4):

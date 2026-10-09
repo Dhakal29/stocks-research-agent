@@ -74,13 +74,18 @@ This directory is git-ignored, so provide the books on every installation.
 `rag_engine.py` extracts PDF text with `pypdf`, embeds sentences locally with
 FastEmbed (`BAAI/bge-small-en-v1.5`), and computes a cosine similarity matrix to
 split at shifts in meaning. Passages remain within their original PDF page and
-are capped at 180 words by default. Chroma persists the passage embeddings and
-ranks vector queries using cosine similarity; low-scoring matches are omitted.
+are capped at 180 words by default. Isolated page numbers and short headings
+are excluded, and small trailing passages merge when the size cap allows.
+Chroma persists the passage embeddings and ranks vector queries using cosine
+similarity; low-scoring or uninformative matches are omitted. Retrieval examines
+extra candidates so discarded fragments do not leave empty result slots.
 
 For a bare symbol or an analysis/investment question, the first provider request
-gathers cited web evidence. The question, short sections of that response and
-investing topics drive vector queries; up to eight distinct passages go into
-a second search-enabled request for the assessment. Set `NEPSE_RAG_WEB_FIRST=0`
+gathers cited web evidence. Meaningful question text and investing topics come
+before short sections of that response. Bare tickers and opaque
+citation URLs are excluded from vector queries. Up to eight distinct passages
+go into a second request for the assessment, with no search tool. That request
+uses only the supplied dated facts and book methods. Set `NEPSE_RAG_WEB_FIRST=0`
 to use question-only retrieval before a single research stage. General market
 summaries and news keep one stage by default. These flows apply to both model
 providers and all interfaces. Stock assessments use the financial scorecard;
@@ -88,7 +93,8 @@ other questions retain their requested scope.
 
 SHA-256 book fingerprints detect added, removed or changed PDFs and rebuild the
 cache. Changed embedding models or chunking settings also trigger reindexing;
-legacy TF-IDF caches migrate automatically. `NEPSE_BOOKS_DIR` selects another
+legacy caches migrate automatically to index version 4, removing fragments.
+`NEPSE_BOOKS_DIR` selects another
 PDF directory, `NEPSE_BOOK_INDEX` selects the manifest, and `NEPSE_VECTOR_DB`
 selects Chroma storage. `NEPSE_EMBEDDING_MODEL` selects a supported FastEmbed
 model; `NEPSE_EMBEDDING_CACHE` selects its download cache. Embeddings run locally
@@ -106,28 +112,54 @@ copyable inspection, OCR and rebuilding examples.
 
 INFO logs print the web response used for retrieval, every exact vector query,
 cosine similarity scores, rejected matches and the book context passed to the
-model. `book_sources` in JSON reports exposes the supplied passages and their
-metadata, including their retrieval scores; `cited_sources` holds web sources.
-The model uses supplied `[BOOK:chunk_id]` citations. Unknown IDs, unverified
-book-reference brackets and missing required book citations are rejected;
-accepted markers render as filename/chapter/PDF-page references. This validates
-citation identities, not the truth of every financial claim or calculation.
+model. `[RAG citation map]` logs connect short book markers to original chunk
+IDs. `book_sources` in JSON reports exposes the supplied passages and their
+metadata, including retrieval scores, the short `citation_id` and original
+`chunk_id`; `cited_sources` holds web sources. The final synthesis uses supplied
+`[WEB:id]` citations and numeric book markers such as `[BOOK:1]`.
+Web markers map only to sources already cited by the completed web stage;
+unknown IDs and raw web links are rejected. Only actually cited sources count
+toward final site coverage. Unknown book IDs, unverified book-reference brackets
+and missing required book citations are rejected. Accepted markers render as
+web links or filename/chapter/PDF-page references. Citation retries name the
+invalid IDs and list allowed book markers, using the same passages. This validates citation
+identities, not the truth of every financial claim or calculation. Historical
+book examples explain methods and must not become current stock facts.
 If retrieval fails or no match qualifies, the prompt marks book evidence as
 unavailable and forbids invented book references. Check the source passages
 when reviewing the generated rationale.
 
 ## Internet search tool and source coverage
 
-Gemini HTTP 500/502/503/504 failures get up to three generation attempts, with
-exponential backoff and jitter. Each stage shares a 180-second generation
-deadline across all attempts and delays. Retry logs include the HTTP status,
-model, attempt number and delay. A retry repeats only the failed generation;
-it does not rerun completed research or book retrieval. Authentication,
-configuration and quota errors stop immediately with status-specific guidance.
-If temporary failures persist, the UI reports that Gemini is unavailable after
-three attempts, rather than suggesting the API key is necessarily wrong.
+Gemini temporary HTTP 429 and HTTP 500/502/503/504 failures get up to three
+generation attempts, with exponential backoff and jitter. A 429 without a wait
+hint uses delays of about 5 then 10 seconds; 5xx failures start at about 1 then
+2 seconds. `Retry-After` (seconds or HTTP date) and Google's `RetryInfo.retryDelay`
+are respected, using the longer wait when both are present. Automatic waits
+are limited to 60 seconds each; a longer provider wait is shown to the user
+without retrying early. Each stage shares a 180-second generation deadline
+across all attempts and delays.
 
-The Gemini request registers the actual search tool:
+An explicit daily-quota violation or zero quota stops immediately even if the
+error includes a short retry hint. The UI distinguishes these from a known
+per-minute/per-second limit. If Google supplies insufficient details, it says
+the rate limit or quota is still exceeded without guessing which one. Check
+the selected model's usage, limits and billing in Google AI Studio; see
+[Google's rate-limit guide](https://ai.google.dev/gemini-api/docs/rate-limits).
+Retries cannot increase a project's quota.
+
+Retry logs include the HTTP status, model, quota category, attempt number and
+delay, without dumping provider error bodies. A retry repeats only the failed
+generation; it does not rerun completed research or book retrieval.
+Authentication and configuration errors still stop immediately. Persistent
+5xx failures receive a service-unavailable message.
+
+Default stock analysis makes separate web-evidence and final-analysis requests,
+so one stock can consume more than one API request. To reduce calls, you can set
+`NEPSE_RAG_WEB_FIRST=0`: books are then retrieved from your question before one
+search-enabled analysis request. Evidence-validation retries may still add calls.
+
+The Gemini web-evidence request registers the actual search tool:
 
 ```python
 config=types.GenerateContentConfig(
@@ -160,6 +192,14 @@ If the first response has insufficient source coverage or no usable search
 evidence, one additional search request asks for broader coverage. If the second
 response still fails the check, the agent returns an error. Provider errors
 such as quota failures do not cause this search retry.
+
+The final book-based synthesis does not require fresh grounding metadata,
+because it has no search tool and reuses the evidence already retrieved.
+Citation failures get one synthesis retry with the same evidence and book
+passages. A persistent failure is returned without restarting web search or
+book retrieval. Search queries, searched URLs and Google Search suggestions
+from the evidence stage are preserved in the final report. Uncited or unknown
+sources never become valid merely because the synthesis omitted search metadata.
 
 To require at least three sites:
 
@@ -245,12 +285,24 @@ outside Nepal finance are researched on their own terms. The model follows the
 user's requested language, length and format; a focused stock question only
 includes relevant sections.
 
-"Today" is resolved using the supplied research date in Asia/Kathmandu, with
-the trading timezone identified for another market. The model must verify the
-actual session date, label provisional intraday data, and identify the latest
-verified session when today's figures cannot be found. A closure or holiday
-must be verified before being asserted. These are model instructions, not a
-guarantee that every source has fresh or complete data.
+Each user request reads the current system date and time in `Asia/Kathmandu`
+(UTC+05:45). An authoritative clock block comes first in every provider prompt:
+the Nepal date/time, equivalent UTC instant, default stock search date and
+dated 30-day news window. Both research stages and evidence retries share this
+request cutoff; the next user request gets a fresh clock value. The same
+timestamp appears in `researched_at`, the report header and `[research clock]`
+logs. Keep the machine's system clock correct.
+
+Stock research, including bare tickers, defaults to the current date. Explicit
+historical dates and periods take precedence. Current quote/news searches are
+instructed to include the ticker/company and current date. For another market,
+the model must identify its local trading date and timezone. It must show the
+source's actual quote date/time (or say the time is unavailable), label intraday
+or delayed data, and identify the latest verified session when today's figures
+cannot be found. Financial metrics retain their reporting period and publication
+date. A future scheduled event must not be presented as already observed.
+A closure or holiday must be verified before being asserted. These are model
+instructions, not a guarantee that every source has fresh or complete data.
 
 For a full company report:
 

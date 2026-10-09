@@ -22,21 +22,22 @@ flowchart TD
     Books[Local PDF investment books] --> Extract[Text extraction and optional OCR]
     Extract --> Chunk[Semantic sentence grouping]
     Chunk --> Index[Local embeddings in persistent Chroma]
-    Agent --> Evidence[Web research response]
+    Agent --> Web[Gemini or OpenAI web research]
+    Web <--> Search[Hosted web search for current company evidence]
+    Web --> Evidence[Cited web research response]
     Evidence --> Retrieve[Cosine vector search using question and evidence]
     Index --> Retrieve
     Retrieve --> Prompt[Research prompt with book title, chapter and PDF page]
     Evidence --> Prompt
-    Prompt --> Model[Gemini or OpenAI]
-    Model <--> Search[Hosted web search for current company evidence]
+    Prompt --> Model[Gemini or OpenAI synthesis from supplied evidence]
     Model --> Report[Financial scorecard, assessment and references]
     Report --> Interface
 ```
 
 For a bare stock symbol or an analysis/investment question, web research runs
-first. Its response and the question drive semantic book retrieval; a second
-search-enabled model call writes the assessment using both sources. General
-market summaries and news retain a single research stage. Set
+first. Its response and investment questions drive semantic book retrieval;
+a second model call writes the assessment from those sources without another
+web search. General market summaries and news retain a single research stage. Set
 `NEPSE_RAG_WEB_FIRST=0` to retrieve books before the original single-stage
 request instead. The CLI and A2A server use the same research engine.
 
@@ -53,7 +54,7 @@ request instead. The CLI and A2A server use the same research engine.
 - **Fundamentals and News**: Searches for the latest available prices, financial metrics, dated company results and corporate announcements.
 - **Answers Based on the Query**: Supports today's market summary, news, sector analysis, comparisons, economic questions and other research topics. A stock symbol is optional; a bare symbol still requests a full company report.
 - **Multiple Website Sources**: Requires citations from at least two publisher sites, with one further search attempt when coverage is insufficient. Configure the threshold with `NEPSE_MIN_SITES`.
-- **Temporary Gemini Error Recovery**: Retries HTTP 500/502/503/504 failures twice with exponential backoff and jitter, within a shared 180-second generation deadline per stage. Logs show attempts and delays; persistent outages receive a clear service-unavailable message.
+- **Temporary Gemini Error Recovery**: Retries temporary HTTP 429 and 500/502/503/504 failures twice with exponential backoff and jitter, within a shared 180-second generation deadline per stage. Honors provider wait hints up to 60 seconds per retry; longer waits and daily/zero quotas receive specific guidance. Logs show attempts and delays.
 - **Readable Reports and Research Logs**: The Streamlit UI places the web source list in an expandable section. Terminal logs show indexing, search progress, source coverage and the investment verdict when detected.
 - **Multiple Interfaces**:
   - Interactive Web Chat UI (Streamlit)
@@ -120,22 +121,31 @@ to reference book principles when explaining a company assessment.
    cosine similarity matrix identifies meaning shifts between neighboring
    sentences. Page boundaries and a default **180-word maximum** keep citations
    precise and embedding inputs short. The default minimum group size is 50 words;
-   page endings and maximum-size splits may produce smaller groups.
+   page endings and maximum-size splits may produce smaller groups. Isolated
+   page numbers and short headings are excluded; small trailing passages merge
+   with preceding content when the size cap permits.
 3. The same model embeds each resulting passage. **Chroma** persists these dense
    vectors and uses **cosine distance** for nearest-neighbor search. Logged
    similarity scores are `1 - distance`; they are relevance scores, not confidence
    in a financial claim. Matches below the configurable floor are omitted.
 4. For stock analyses, a first Gemini/OpenAI request gathers cited web evidence.
-   The original question, short sections of that response and separate investing
-   topics become vector queries. Diverse results are deduplicated by passage ID;
+   A meaningful question and investment topics come before short sections of
+   that response. Bare tickers are not embedded alone, and citation
+   URLs are removed from vector queries. Results are deduplicated by passage ID;
    up to **eight passages** are supplied to the final model request.
-5. The final search-enabled request combines web evidence and the book passages.
-   Book citations use exact supplied IDs, which the application validates and
-   renders as book/chapter/PDF-page references. Source-coverage or citation
-   failures can trigger one further research attempt.
+5. The final request combines web evidence and book passages without a search
+   tool. It cites the existing sources with `[WEB:id]` and books with short
+   numeric markers such as `[BOOK:1]`. Each book marker maps to a supplied
+   passage; the application validates and renders its filename, chapter and
+   PDF page. The model does not need to copy database chunk IDs.
+   The final answer must cite at least the configured number of publisher sites.
+   A citation failure retries only this synthesis stage, reusing the same
+   evidence and passages. Initial web research still requires actual search
+   metadata and can retry once when source coverage is insufficient.
 
 The default cache is `training_books/.rag_index.json`. SHA-256 fingerprints
-detect added, removed or changed PDFs. The first embedding use downloads the
+detect added, removed or changed PDFs. Index version 4 automatically rebuilds
+older caches to remove fragments. The first embedding use downloads the
 pretrained model; subsequent calls reuse its local files. No embedding-provider
 API key or fine-tuning is required. Indexing and retrieval run locally;
 the selected passages are sent to your configured model provider with the
@@ -241,11 +251,14 @@ During a stock assessment, terminal logs include:
 [RAG vector query] text='Can accounting profit be trusted if cash from operations is negative?' top_k=4 min_similarity=0.450 model=BAAI/bge-small-en-v1.5
 [RAG vector result] id=... cosine_similarity=0.7733 book=Module 3_Fundamental Analysis.pdf chapter=Chapter 13 page=140
 ...the matched passage...
+[RAG citation map] [BOOK:1] -> chunk_id='Module 3_Fundamental Analysis.pdf_140_1' book='Module 3_Fundamental Analysis.pdf' chapter='Chapter 13' page=140
 [RAG model context] Passing 8 book passages to the provider:
 ...the exact context with citation IDs...
 ```
 
-Rejected matches are logged too. With `NEPSE_RAG_WEB_FIRST=0`, retrieval logs
+Rejected matches and invalid book citation IDs are logged too. Citation retries
+include the allowed markers for the same retrieved passages. With
+`NEPSE_RAG_WEB_FIRST=0`, retrieval logs
 show the question and topic queries; no web response exists yet at that stage.
 
 ### Request a stock assessment
@@ -266,7 +279,8 @@ checks web-source coverage and supplied book citation IDs. It does not verify
 that every claim follows from its citation or independently audit financial
 calculations. Semantic retrieval improves matching; it cannot guarantee that
 the generated report is correct. JSON `cited_sources` contains web sources;
-`book_sources` contains the supplied passages, metadata and similarity scores,
+`book_sources` contains the supplied passages, metadata and similarity scores.
+Its `citation_id` field maps short markers to the original `chunk_id`,
 including passages the final answer may not cite. If retrieval fails or no
 match qualifies, the prompt explicitly marks book evidence as unavailable and
 forbids invented book references. Inspect the logs and source passages when
@@ -355,9 +369,15 @@ citations. The JSON report includes `source_domains`, `search_queries`,
 The model plans searches from the user's question, starts with broad web searches,
 then checks relevant primary sources and other publishers. It is not restricted
 to MeroLagani or a fixed list of sites. Search retrieves relevant accessible
-evidence; it cannot read the entire internet. For today's summaries, the model
-is instructed to verify the actual session date, label intraday data and identify
-older data when today's figures are unavailable.
+evidence; it cannot read the entire internet. Each request reads the current
+date and time from the system clock in `Asia/Kathmandu` (UTC+05:45). This clock,
+the default stock search date and a dated 30-day news window appear first in
+every research prompt, including book analysis and retries. Logs print
+`[research clock]` with the same timestamp used in the report.
+Stock research defaults to that current date unless you request a historical
+period. The model is instructed to include the date in current quote/news
+searches, show actual quote timestamps and financial reporting periods, and
+label older data when current figures are unavailable.
 See [the search-tool and source-coverage guide](nepse_agent/README.md#internet-search-tool-and-source-coverage)
 for configuration and [Google's grounding documentation](https://ai.google.dev/gemini-api/docs/generate-content/google-search)
 for the API contract. Prices retain their source dates; search does not guarantee
