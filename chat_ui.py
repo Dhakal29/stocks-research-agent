@@ -1,7 +1,6 @@
 import streamlit as st
 import asyncio
 from dataclasses import asdict
-from streamlit.components.v1 import html
 from nepse_agent.client import AgentUnavailableError, ask_agent_report
 from nepse_agent.agent import NepseResearchAgent, ResearchError, configure_research_logging
 
@@ -28,8 +27,6 @@ def render_clean_report(markdown_text: str) -> None:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         render_clean_report(msg["content"])
-        if msg.get("search_suggestions_html"):
-            html(msg["search_suggestions_html"], height=120, scrolling=True)
 
 # User prompt
 prompt = st.chat_input("Ask a question, e.g. Analyze NABIL based on fundamental books")
@@ -50,10 +47,7 @@ if prompt:
                 st.error(str(exc))
             else:
                 response = report_data["markdown"]
-                suggestions = report_data.get("search_suggestions_html", "")
                 render_clean_report(response)
-                if suggestions:
-                    html(suggestions, height=120, scrolling=True)
                 st.session_state.messages.append({
-                    "role": "assistant", "content": response, "search_suggestions_html": suggestions,
+                    "role": "assistant", "content": response,
                 })
