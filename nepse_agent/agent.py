@@ -133,13 +133,18 @@ Required Sections:
    - Present verified metrics: P/E, P/B, EPS (NPR), Book Value (NPR), ROE (%), Operating Margin / NIM (%), and Dividend Yield.
 3. **Training Books Due Diligence Scorecard (Pass / Caution / Fail)**:
    - Evaluate against the book's framework (*Module 3 Fundamental Analysis*):
-     * *Profitability & ROE*: Benchmark >= 15-20%.
-     * *Financial Leverage & Debt*: Debt-to-Equity and Interest Coverage.
+     * *Profitability & ROE*: Benchmark >= 15-20% (demonstrates durable competitive advantage/moat).
+     * *Financial Leverage & Debt*: Debt-to-Equity and Interest Coverage (> 2.5x).
      * *Cash Flow vs Accounting Profit*: Positive Operating Cash Flow backing net profit.
-     * *Valuation Cushion (Graham Test)*: `P/E * P/B <= 22.5` & Graham Number comparison with current price.
+     * *Valuation Cushion & Multiple*:
+       - Graham's `P/E * P/B <= 22.5` is a classic **deep-value benchmark** (designed for industrial/asset-heavy firms with low ROE).
+       - High-ROE quality/FMCG companies (like Unilever Nepal with 35%+ ROE, zero debt) naturally command higher P/E and P/B multiples in modern markets due to high capital efficiency. Do NOT treat high P/B alone as automatic "high risk" if ROE and cash flow are exceptional. Compare multiples against peer/sector context.
 4. **Investment Verdict & Rationales**:
-   - Clear Tag: **[INVESTMENT GRADE / ATTRACTIVE]**, **[MODERATE / FAIR VALUE (HOLD)]**, or **[AVOID / HIGH RISK]**.
-   - **Why & How (Rationale based on Books)**: Explain the *exact reason* why this verdict was reached. Reference the specific book principles (e.g., *Module 3: Chapter 13 Due Diligence / Chapter 14 Margin of Safety*).
+   - Provide a balanced verdict reflecting both Business Quality (Buffett/Moat principles) and Price/Valuation (Graham principles):
+     * **[INVESTMENT GRADE / HIGH QUALITY (BUY/ACCUMULATE)]**: Strong ROE (>= 15-20%), clean/low-debt balance sheet, positive operating cash flow, and reasonable/fair valuation relative to growth and profitability.
+     * **[MODERATE / FAIR VALUE (HOLD)]**: Exceptional business quality and moat, but current market price reflects premium valuation with limited immediate margin of safety (classic "Great Company at Fair/Premium Price"). Or solid fundamentals facing temporary sector headwinds.
+     * **[AVOID / HIGH RISK]**: Reserve this strictly for businesses with genuinely dangerous fundamentals: heavy debt/leverage distress, negative or eroding cash flows, declining net profit margins, or excessive speculative hype without fundamental earnings support.
+   - **Why & How (Rationale based on Books)**: Explain the holistic reasoning balancing Quality (Moat & Capital Efficiency from *Module 3: Chapter 9/13*) and Valuation (*Chapter 10/14*).
    - **Key Strengths** (2-3 concise bullets).
    - **Key Red Flags / Concerns** (2-3 concise bullets).
 5. **Recent Corporate Actions / Catalysts**:
