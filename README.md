@@ -96,14 +96,28 @@ request instead. The CLI and A2A server use the same research engine.
    Gemini is the default provider. To use OpenAI, set `NEPSE_PROVIDER="openai"`
    and provide `OPENAI_API_KEY`.
 
-5. **Add your investment books**:
+5. **Add your investment training books**:
    ```bash
    mkdir -p training_books
    ```
-   Place PDF files directly in `training_books/`. This folder is git-ignored;
-   each installation needs its own copies of the books. The first research
-   request builds the local index automatically. See the setup and inspection
-   commands below to verify retrieval before making a provider request.
+   Place your training PDF files directly inside the `training_books/` folder. For example:
+   ```text
+   training_books/
+   ├── Module 3_Fundamental Analysis.pdf
+   ├── The Fundamental Analysis_ An Overview.pdf
+   └── UNIT2-FUNDAMENTAL-ANALYSIS-TECHNICAL-ANALYSIS-min.pdf
+   ```
+   > **Note**: The `training_books/` directory and its generated indexes are git-ignored. You only need to copy your own PDF books into this directory.
+   
+   Once copied, build the vector index:
+   ```bash
+   # Standard indexing (for text-based PDFs):
+   python -m nepse_agent index-books
+
+   # Or if you have scanned image-based PDFs (requires macOS):
+   python -m nepse_agent index-books --ocr
+   ```
+   If you don't run the command manually, the index builds automatically on the first research request.
 
 ---
 
