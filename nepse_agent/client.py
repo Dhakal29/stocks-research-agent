@@ -30,7 +30,9 @@ async def ask_agent_report(
     """Return report metadata, including Google Search suggestions for UI rendering."""
     query = validate_query(query)
     if http_client is None:
-        async with httpx.AsyncClient(timeout=480) as client:
+        # Allow two research stages and an evidence-validation retry; each stage
+        # has its own generation deadline, including transient HTTP retries.
+        async with httpx.AsyncClient(timeout=900) as client:
             return await ask_agent_report(query, url, client)
     try:
         client = await create_client(

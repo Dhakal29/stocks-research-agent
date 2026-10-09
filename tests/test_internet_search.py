@@ -10,6 +10,17 @@ import pytest
 from nepse_agent.agent import EvidenceError, NepseResearchAgent, ResearchError, parse_gemini_report
 
 
+@pytest.fixture(autouse=True)
+def isolate_local_book_retrieval(monkeypatch):
+    # Provider transport tests must not download models or depend on local PDFs.
+    from types import SimpleNamespace
+    monkeypatch.setenv("NEPSE_RAG_WEB_FIRST", "0")
+    monkeypatch.setattr(
+        "nepse_agent.rag_engine.get_rag_store",
+        lambda: SimpleNamespace(retrieve_for_analysis=lambda *args, **kwargs: []),
+    )
+
+
 def grounded_response():
     first = "नबिल परीक्षण विवरण।"
     second = "Synthetic company news from another publisher."
@@ -177,3 +188,120 @@ def test_provider_and_site_configuration(monkeypatch):
     with pytest.raises(ResearchError, match="between 2 and 10"):
         monkeypatch.setenv("NEPSE_MIN_SITES", "invalid")
         NepseResearchAgent()
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_gemini_transient_errors_retry_then_recover_without_changing_query(status, monkeypatch, caplog):
+    from unittest.mock import AsyncMock
+    calls = []
+    sleep = AsyncMock()
+    monkeypatch.setattr("nepse_agent.agent.asyncio.sleep", sleep)
+    monkeypatch.setattr("nepse_agent.agent.random.uniform", lambda *args: 0.0)
+    def respond(request):
+        calls.append(json.loads(request.content))
+        if len(calls) < 3:
+            return httpx.Response(status, json={"error": {
+                "code": status, "message": "private-body test-key", "status": "UNAVAILABLE",
+            }})
+        return httpx.Response(200, json=grounded_response())
+    with caplog.at_level("WARNING", logger="nepse_agent.agent"):
+        report = asyncio.run(google_agent(respond).research("unhpl"))
+    assert len(calls) == 3
+    assert calls[0] == calls[1] == calls[2]
+    assert calls[0]["contents"][0]["parts"][0]["text"] == "unhpl"
+    assert report.query == "unhpl"
+    assert report.source_domains == ["merolagani.com", "sharesansar.com"]
+    assert [call.args[0] for call in sleep.await_args_list] == [1.0, 2.0]
+    assert f"[Gemini retry] HTTP {status}" in caplog.text
+    assert "private-body" not in caplog.text
+    assert "test-key" not in caplog.text
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_gemini_persistent_transient_errors_stop_after_three_attempts(status, monkeypatch):
+    from unittest.mock import AsyncMock
+    calls = []
+    sleep = AsyncMock()
+    monkeypatch.setattr("nepse_agent.agent.asyncio.sleep", sleep)
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(status, json={"error": {
+            "code": status, "message": "private-body test-key", "status": "UNAVAILABLE",
+        }})
+    with pytest.raises(ResearchError, match=f"temporarily unavailable.*HTTP {status}.*3 attempts") as error:
+        asyncio.run(google_agent(respond).research("unhpl"))
+    assert len(calls) == 3
+    assert sleep.await_count == 2
+    assert "GEMINI_API_KEY" not in str(error.value)
+    assert "private-body" not in str(error.value)
+    assert "test-key" not in str(error.value)
+
+
+@pytest.mark.parametrize("status,hint", [
+    (400, "request settings"), (401, "GEMINI_API_KEY"),
+    (403, "permissions"), (404, "GEMINI_MODEL"),
+])
+def test_gemini_configuration_errors_fail_immediately(status, hint, monkeypatch):
+    from unittest.mock import AsyncMock
+    sleep = AsyncMock()
+    monkeypatch.setattr("nepse_agent.agent.asyncio.sleep", sleep)
+    calls = []
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(status, json={"error": {"code": status, "message": "private-body test-key"}})
+    with pytest.raises(ResearchError, match=hint):
+        asyncio.run(google_agent(respond).research("UNHPL"))
+    assert len(calls) == 1
+    sleep.assert_not_awaited()
+
+
+def test_gemini_generation_deadline_cancels_slow_request(monkeypatch):
+    monkeypatch.setattr("nepse_agent.agent.GEMINI_REQUEST_TIMEOUT", 0.02)
+    calls, cancelled = [], []
+    async def respond(request):
+        calls.append(request)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+    with pytest.raises(ResearchError, match="including retries"):
+        asyncio.run(google_agent(respond).research("unhpl"))
+    assert len(calls) == 1
+    assert cancelled == [True]
+
+
+def test_gemini_503_in_assessment_retries_only_that_stage(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from nepse_agent.rag_engine import DocumentChunk
+    monkeypatch.setenv("NEPSE_RAG_WEB_FIRST", "1")
+    monkeypatch.setattr("nepse_agent.agent.asyncio.sleep", AsyncMock())
+    chunk = DocumentChunk("actual-id", "Book.pdf", "Cash flow", 9, "Operating cash flow should support earnings.", 0.8)
+    retrievals = []
+    def retrieve(query, evidence="", top_k=8):
+        retrievals.append((query, evidence))
+        return [chunk]
+    monkeypatch.setattr(
+        "nepse_agent.rag_engine.get_rag_store",
+        lambda: SimpleNamespace(retrieve_for_analysis=retrieve),
+    )
+    prompts = []
+    def respond(request):
+        prompts.append(json.loads(request.content)["systemInstruction"]["parts"][0]["text"])
+        if len(prompts) == 2:
+            return httpx.Response(503, json={"error": {"code": 503, "message": "temporary overload", "status": "UNAVAILABLE"}})
+        data = grounded_response()
+        if len(prompts) == 3:
+            candidate = data["candidates"][0]
+            candidate["content"]["parts"][-1]["text"] += " [BOOK:actual-id]"
+            candidate["groundingMetadata"]["groundingSupports"][-1]["segment"]["endIndex"] = len(
+                candidate["content"]["parts"][-1]["text"].encode("utf-8")
+            )
+        return httpx.Response(200, json=data)
+    report = asyncio.run(google_agent(respond).research("unhpl"))
+    assert len(prompts) == 3
+    assert prompts[1] == prompts[2]
+    assert "web-evidence stage" in prompts[0]
+    assert "WEB RESEARCH RESPONSE" in prompts[1]
+    assert len(retrievals) == 1
+    assert "[Book.pdf | Cash flow | PDF page 9]" in report.markdown

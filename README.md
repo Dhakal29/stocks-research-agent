@@ -20,33 +20,40 @@ flowchart TD
     User[Stock symbol or research question] --> Interface[Streamlit, CLI or A2A client]
     Interface --> Agent[NEPSE Research Agent]
     Books[Local PDF investment books] --> Extract[Text extraction and optional OCR]
-    Extract --> Index[Cached TF-IDF book index]
-    Agent --> Retrieve[Retrieve up to 3 relevant passages]
+    Extract --> Chunk[Semantic sentence grouping]
+    Chunk --> Index[Local embeddings in persistent Chroma]
+    Agent --> Evidence[Web research response]
+    Evidence --> Retrieve[Cosine vector search using question and evidence]
     Index --> Retrieve
     Retrieve --> Prompt[Research prompt with book title, chapter and PDF page]
-    Agent --> Prompt
+    Evidence --> Prompt
     Prompt --> Model[Gemini or OpenAI]
     Model <--> Search[Hosted web search for current company evidence]
     Model --> Report[Financial scorecard, assessment and references]
     Report --> Interface
 ```
 
-Book retrieval happens before the model request. The model receives those
-passages and uses its web-search tool to gather current evidence within the
-same research request. The CLI and A2A server use the same research engine.
+For a bare stock symbol or an analysis/investment question, web research runs
+first. Its response and the question drive semantic book retrieval; a second
+search-enabled model call writes the assessment using both sources. General
+market summaries and news retain a single research stage. Set
+`NEPSE_RAG_WEB_FIRST=0` to retrieve books before the original single-stage
+request instead. The CLI and A2A server use the same research engine.
 
 ---
 
 ## Features
 
 - **Standard A2A Protocol**: Fully compliant `AgentCard` metadata, task state lifecycle (`TASK_STATE_WORKING` -> `TASK_STATE_COMPLETED`), and structured report artifacts.
-- **Book-Based RAG Context**: Retrieves passages from `training_books/*.pdf` using TF-IDF and cosine similarity. Each passage retains its book filename, chapter and PDF page number.
-- **Financial Scorecard and Investment Assessment**: Full company reports request Pass / Caution / Fail assessments of profitability, leverage, cash flow and valuation, with strengths, risks and book references. Verdicts include `[INVESTMENT GRADE / ATTRACTIVE]`, `[MODERATE / FAIR VALUE (HOLD)]` and `[AVOID / HIGH RISK]`.
-- **Persistent Local Index**: Caches extracted passages in `.rag_index.json` and rebuilds when PDF contents or the set of books changes. Common abbreviations such as EPS, ROE, P/E and P/B are expanded during retrieval.
+- **Semantic Book Retrieval**: Groups sentences by shifts in embedding similarity, then searches local FastEmbed vectors in persistent Chroma using cosine similarity. Passages retain their book filename, detected chapter and exact PDF page.
+- **Financial Scorecard and Investment Assessment**: Full company reports request Pass / Caution / Fail assessments of profitability, leverage, cash flow and valuation. The prompt separates business quality from valuation and uses only supplied book references.
+- **Persistent Local Index**: Caches passage metadata in `.rag_index.json`, vectors in `.rag_vectors/`, and the pretrained model in `.embedding_models/`. Changed PDFs, embedding models or chunking settings trigger reindexing; legacy TF-IDF indexes migrate automatically.
+- **Retrieval Logs and Book Sources**: Logs show the web response used for retrieval, exact vector query strings, cosine scores, rejected matches and passages passed to the model. JSON reports expose these supplied passages in `book_sources`; unknown book citation IDs are rejected.
 - **Optional Local OCR**: A Python indexing option uses macOS Vision and Swift to recognize text in scanned PDF pages. Extraction status and skipped-page warnings help identify books missing from the index.
 - **Fundamentals and News**: Searches for the latest available prices, financial metrics, dated company results and corporate announcements.
 - **Answers Based on the Query**: Supports today's market summary, news, sector analysis, comparisons, economic questions and other research topics. A stock symbol is optional; a bare symbol still requests a full company report.
 - **Multiple Website Sources**: Requires citations from at least two publisher sites, with one further search attempt when coverage is insufficient. Configure the threshold with `NEPSE_MIN_SITES`.
+- **Temporary Gemini Error Recovery**: Retries HTTP 500/502/503/504 failures twice with exponential backoff and jitter, within a shared 180-second generation deadline per stage. Logs show attempts and delays; persistent outages receive a clear service-unavailable message.
 - **Readable Reports and Research Logs**: The Streamlit UI places the web source list in an expandable section. Terminal logs show indexing, search progress, source coverage and the investment verdict when detected.
 - **Multiple Interfaces**:
   - Interactive Web Chat UI (Streamlit)
@@ -109,21 +116,38 @@ to reference book principles when explaining a company assessment.
 ### Indexing and retrieval
 
 1. `pypdf` extracts text from each PDF page.
-2. Text is split into windows of up to **350 words**, with **50 words of overlap**
-   within a page. Chunks retain the filename, detected chapter and PDF page.
-3. The store builds **TF-IDF word vectors** and ranks passages by **cosine
-   similarity**. It uses local lexical retrieval, with abbreviation expansion
-   and stop-word filtering.
-4. For each research request, the user's query is expanded with investment
-   topics such as due diligence, valuation, return on equity and debt. The
-   **top three matching chunks** are added to the model's instructions.
-5. Gemini or OpenAI combines the supplied context with its web-search evidence
-   to write the requested report.
+2. A local pretrained **`BAAI/bge-small-en-v1.5`** model embeds sentences. A
+   cosine similarity matrix identifies meaning shifts between neighboring
+   sentences. Page boundaries and a default **180-word maximum** keep citations
+   precise and embedding inputs short. The default minimum group size is 50 words;
+   page endings and maximum-size splits may produce smaller groups.
+3. The same model embeds each resulting passage. **Chroma** persists these dense
+   vectors and uses **cosine distance** for nearest-neighbor search. Logged
+   similarity scores are `1 - distance`; they are relevance scores, not confidence
+   in a financial claim. Matches below the configurable floor are omitted.
+4. For stock analyses, a first Gemini/OpenAI request gathers cited web evidence.
+   The original question, short sections of that response and separate investing
+   topics become vector queries. Diverse results are deduplicated by passage ID;
+   up to **eight passages** are supplied to the final model request.
+5. The final search-enabled request combines web evidence and the book passages.
+   Book citations use exact supplied IDs, which the application validates and
+   renders as book/chapter/PDF-page references. Source-coverage or citation
+   failures can trigger one further research attempt.
 
 The default cache is `training_books/.rag_index.json`. SHA-256 fingerprints
-detect added, removed or changed PDFs. Indexing and retrieval run locally;
+detect added, removed or changed PDFs. The first embedding use downloads the
+pretrained model; subsequent calls reuse its local files. No embedding-provider
+API key or fine-tuning is required. Indexing and retrieval run locally;
 the selected passages are sent to your configured model provider with the
-research request.
+research request. The default stock-analysis flow uses an additional model call,
+so its latency and provider charges can increase.
+
+Build or migrate the index without making a research-provider call:
+
+```bash
+python -m nepse_agent index-books
+python -m nepse_agent index-books --rebuild
+```
 
 ### Inspect the knowledge store locally
 
@@ -145,7 +169,7 @@ for chunk in store.retrieve("cash flow earnings quality debt equity valuation", 
 PY
 ```
 
-This inspects local retrieval without calling the model or web-search API.
+This inspects local retrieval without calling the research model or web-search API.
 Page numbers refer to the PDF's page order and may differ from printed page
 numbers in the book.
 
@@ -157,6 +181,12 @@ text and skipped during ordinary indexing. A scanned book such as
 text passages. Check `store.warnings` and `store.book_status` for skipped pages.
 
 On **macOS with Swift available**, build the index with local OCR enabled:
+
+```bash
+python -m nepse_agent index-books --ocr
+```
+
+The Python API remains available:
 
 ```bash
 python - <<'PY'
@@ -187,11 +217,36 @@ formulas or tables extracted from images.
 | --- | --- | --- |
 | `NEPSE_BOOKS_DIR` | Repository's `training_books/` | Directory containing the PDF books |
 | `NEPSE_BOOK_INDEX` | `<books directory>/.rag_index.json` | Location of the extracted-passage cache |
+| `NEPSE_VECTOR_DB` | Beside the index: `.rag_vectors/` | Persistent Chroma storage |
+| `NEPSE_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Supported FastEmbed model; changing it rebuilds the index |
+| `NEPSE_EMBEDDING_CACHE` | Beside the index: `.embedding_models/` | Local model download cache |
+| `NEPSE_CHUNK_MIN_WORDS` | `50` | Minimum group size before a semantic break |
+| `NEPSE_CHUNK_MAX_WORDS` | `180` | Maximum words per passage; must be between the minimum and 400 |
+| `NEPSE_SEMANTIC_BREAK_PERCENTILE` | `75` | Split at adjacent-sentence distances above this percentile |
+| `NEPSE_RAG_MIN_SIMILARITY` | `0.45` | Minimum cosine similarity for retrieval; tune for your model and books |
+| `NEPSE_RAG_WEB_FIRST` | `1` | Use web evidence for stock-analysis retrieval; `0` keeps one-stage research |
 
 Set these in `.env` or export them before starting the app. To rebuild manually,
 call `BookRAGStore().load_or_build(force_rebuild=True)`, adding `ocr=True` when
-needed. Book-index operations currently use the Python API; the terminal
-subcommands are `research`, `serve` and `ask`.
+needed. Terminal subcommands are `research`, `serve`, `ask` and `index-books`.
+
+### See the exact retrieval inputs and outputs
+
+The CLI, server and Streamlit app enable INFO logging for `nepse_agent`.
+During a stock assessment, terminal logs include:
+
+```text
+[RAG evidence input] Web response used to construct vector queries:
+...the web-research response...
+[RAG vector query] text='Can accounting profit be trusted if cash from operations is negative?' top_k=4 min_similarity=0.450 model=BAAI/bge-small-en-v1.5
+[RAG vector result] id=... cosine_similarity=0.7733 book=Module 3_Fundamental Analysis.pdf chapter=Chapter 13 page=140
+...the matched passage...
+[RAG model context] Passing 8 book passages to the provider:
+...the exact context with citation IDs...
+```
+
+Rejected matches are logged too. With `NEPSE_RAG_WEB_FIRST=0`, retrieval logs
+show the question and topic queries; no web response exists yet at that stage.
 
 ### Request a stock assessment
 
@@ -203,17 +258,19 @@ python -m nepse_agent research "Compare NABIL and EBL using fundamental analysis
 
 A full company report requests an executive snapshot, a fundamentals table,
 a due diligence scorecard, an investment verdict with reasons, and dated
-corporate actions. The current prompt includes profitability and Graham-style
-valuation benchmarks alongside retrieved book context. These benchmarks and
-their suitability for the company's sector need review.
+corporate actions. Valuation methods should come from the supplied passages and
+be applied with verified inputs and appropriate sector comparisons.
 
 Book references and the scorecard are generated by the model. The application
-checks web-source coverage but does not independently validate each financial
-calculation or book citation. The JSON `cited_sources` field contains web
-sources; it does not currently expose retrieved book passages as a separate
-citation collection. If book retrieval fails, the agent logs
-`Could not retrieve RAG knowledge` and continues with web research, so inspect
-the logs when confirming that a report used your books.
+checks web-source coverage and supplied book citation IDs. It does not verify
+that every claim follows from its citation or independently audit financial
+calculations. Semantic retrieval improves matching; it cannot guarantee that
+the generated report is correct. JSON `cited_sources` contains web sources;
+`book_sources` contains the supplied passages, metadata and similarity scores,
+including passages the final answer may not cite. If retrieval fails or no
+match qualifies, the prompt explicitly marks book evidence as unavailable and
+forbids invented book references. Inspect the logs and source passages when
+reviewing an assessment.
 
 ---
 
@@ -328,7 +385,7 @@ python -m pytest -q -p no:cacheprovider tests
 │
 ├── nepse_agent/               # Research engine and A2A integration
 │   ├── agent.py               # Book-context injection, web search, citations & synthesis
-│   ├── rag_engine.py          # PDF extraction, chunking, TF-IDF retrieval & caching
+│   ├── rag_engine.py          # Semantic chunking, local embeddings & Chroma search
 │   ├── ocr_books.swift        # Optional macOS OCR for scanned PDF pages
 │   ├── server.py              # A2A AgentCard & JSON-RPC server routes
 │   ├── client.py              # A2A client helper for inter-agent communication

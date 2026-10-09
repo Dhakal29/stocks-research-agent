@@ -9,6 +9,7 @@ from dataclasses import asdict
 import httpx
 
 from .agent import NepseResearchAgent, ResearchError, configure_research_logging
+from .rag_engine import BookRAGError, BookRAGStore
 
 
 def main() -> None:
@@ -25,6 +26,9 @@ def main() -> None:
     ask = commands.add_parser("ask", help="Query an already running A2A server")
     ask.add_argument("query")
     ask.add_argument("--url", default="http://127.0.0.1:10000")
+    index = commands.add_parser("index-books", help="Build semantic book passages and their vector index")
+    index.add_argument("--rebuild", action="store_true", help="Force passage extraction and embedding")
+    index.add_argument("--ocr", action="store_true", help="Recognize scanned PDF pages on macOS")
     args = parser.parse_args()
     try:
         if args.command == "research":
@@ -36,11 +40,19 @@ def main() -> None:
 
             public_url = args.public_url or f"http://{args.host}:{args.port}"
             uvicorn.run(create_app(public_url=public_url), host=args.host, port=args.port)
+        elif args.command == "index-books":
+            store = BookRAGStore()
+            store.load_or_build(force_rebuild=args.rebuild, ocr=args.ocr)
+            print(json.dumps({
+                "indexed_chunks": len(store.chunks), "embedding_model": store.embedding_model,
+                "vector_db_path": store.vector_db_path, "books": store.book_status,
+                "warnings": store.warnings,
+            }, ensure_ascii=False, indent=2))
         else:
             from .client import ask_agent
 
             print(asyncio.run(ask_agent(args.query, args.url)))
-    except (ResearchError, ValueError, httpx.HTTPError) as exc:
+    except (ResearchError, BookRAGError, ValueError, httpx.HTTPError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 

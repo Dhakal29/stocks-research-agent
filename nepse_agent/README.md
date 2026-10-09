@@ -17,10 +17,10 @@ flowchart LR
     Host[A2A client or host agent] --> Server[A2A server]
     Server --> Research
     Research --> Search[Hosted web search]
-    Books[Local PDF investment books] --> Index[Cached TF-IDF index]
-    Research --> Retrieve[Retrieve up to 3 matching book passages]
+    Books[Local PDF investment books] --> Index[Semantic passages and Chroma vectors]
+    Evidence --> Retrieve[Search books using question and web evidence]
     Index --> Retrieve
-    Retrieve --> Research
+    Retrieve --> Report
     Search --> Evidence[Relevant primary sources and news across the web]
     Evidence --> Report[Report with dates and source links]
     Report --> User
@@ -62,38 +62,70 @@ and `export GEMINI_API_KEY=...` are accepted in `.env`.
 ## Local book retrieval and stock assessment
 
 Place PDF books directly in the repository's `training_books/` directory.
-The first research request creates `training_books/.rag_index.json`.
+The first book-retrieval request creates `training_books/.rag_index.json`,
+`.rag_vectors/` and `.embedding_models/`. To build these before research:
+
+```bash
+python -m nepse_agent index-books
+```
+
 This directory is git-ignored, so provide the books on every installation.
 
-`rag_engine.py` extracts PDF text with `pypdf`, creates page-bounded passages
-of up to 350 words with 50-word overlap, and ranks them using TF-IDF and cosine
-similarity. A research query is expanded with investment-related terms, and
-up to three matching passages are supplied to the model before its web-search
-request. This applies to both provider adapters and all interfaces. The model
-is instructed to use the full stock-analysis scorecard for company reports,
-while other questions retain their requested scope.
+`rag_engine.py` extracts PDF text with `pypdf`, embeds sentences locally with
+FastEmbed (`BAAI/bge-small-en-v1.5`), and computes a cosine similarity matrix to
+split at shifts in meaning. Passages remain within their original PDF page and
+are capped at 180 words by default. Chroma persists the passage embeddings and
+ranks vector queries using cosine similarity; low-scoring matches are omitted.
+
+For a bare symbol or an analysis/investment question, the first provider request
+gathers cited web evidence. The question, short sections of that response and
+investing topics drive vector queries; up to eight distinct passages go into
+a second search-enabled request for the assessment. Set `NEPSE_RAG_WEB_FIRST=0`
+to use question-only retrieval before a single research stage. General market
+summaries and news keep one stage by default. These flows apply to both model
+providers and all interfaces. Stock assessments use the financial scorecard;
+other questions retain their requested scope.
 
 SHA-256 book fingerprints detect added, removed or changed PDFs and rebuild the
-cache. `NEPSE_BOOKS_DIR` selects another PDF directory; `NEPSE_BOOK_INDEX`
-selects another index path. The original PDFs and extracted index remain local,
-while selected passage text is sent to the configured model provider.
+cache. Changed embedding models or chunking settings also trigger reindexing;
+legacy TF-IDF caches migrate automatically. `NEPSE_BOOKS_DIR` selects another
+PDF directory, `NEPSE_BOOK_INDEX` selects the manifest, and `NEPSE_VECTOR_DB`
+selects Chroma storage. `NEPSE_EMBEDDING_MODEL` selects a supported FastEmbed
+model; `NEPSE_EMBEDDING_CACHE` selects its download cache. Embeddings run locally
+after the initial model download, without a separate API key or fine-tuning.
+PDFs, the manifest and vectors stay local; selected passages go to the research
+provider. The web-first flow adds a model call and can increase latency and cost.
 
 Pages without usable text are skipped and reported in `BookRAGStore.warnings`
 and `book_status`. Optional macOS OCR is available through
+`python -m nepse_agent index-books --ocr` or
 `BookRAGStore().load_or_build(ocr=True)` and requires Swift. It caches recognized
 English text beside the index without changing the PDFs. See the
 [RAG setup guide](../README.md#rag-analyze-stocks-using-investment-books) for
 copyable inspection, OCR and rebuilding examples.
 
-The current integration injects retrieved passages into the research prompt;
-web research and assessment happen in the same provider request. The model
-generates book references, ratios and the scorecard; these are not independently
-validated by the application. Web citations are preserved in report metadata,
-but retrieved book passages do not yet have a separate JSON citation field.
-If local retrieval fails, the agent logs a warning and continues with web
-research. Check the logs and source passages when reviewing a book-based verdict.
+INFO logs print the web response used for retrieval, every exact vector query,
+cosine similarity scores, rejected matches and the book context passed to the
+model. `book_sources` in JSON reports exposes the supplied passages and their
+metadata, including their retrieval scores; `cited_sources` holds web sources.
+The model uses supplied `[BOOK:chunk_id]` citations. Unknown IDs, unverified
+book-reference brackets and missing required book citations are rejected;
+accepted markers render as filename/chapter/PDF-page references. This validates
+citation identities, not the truth of every financial claim or calculation.
+If retrieval fails or no match qualifies, the prompt marks book evidence as
+unavailable and forbids invented book references. Check the source passages
+when reviewing the generated rationale.
 
 ## Internet search tool and source coverage
+
+Gemini HTTP 500/502/503/504 failures get up to three generation attempts, with
+exponential backoff and jitter. Each stage shares a 180-second generation
+deadline across all attempts and delays. Retry logs include the HTTP status,
+model, attempt number and delay. A retry repeats only the failed generation;
+it does not rerun completed research or book retrieval. Authentication,
+configuration and quota errors stop immediately with status-specific guidance.
+If temporary failures persist, the UI reports that Gemini is unavailable after
+three attempts, rather than suggesting the API key is necessarily wrong.
 
 The Gemini request registers the actual search tool:
 
@@ -246,13 +278,13 @@ and [ShareSansar company profile](https://www.sharesansar.com/company/NABIL).
   Gemini's grounding metadata maps claims
   to source URLs; OpenAI's web-search annotations provide the same attribution.
   The research entry point rejects reports with insufficient cited-site coverage.
-- `rag_engine.py` manages local PDF extraction, page-bounded chunks, TF-IDF
+- `rag_engine.py` manages local PDF extraction, semantic chunks, FastEmbed vectors,
   retrieval, cache freshness and optional OCR. `ocr_books.swift` recognizes
   scanned pages using macOS PDFKit and Vision.
 - `server.py` exposes the researcher through A2A agent discovery, JSON-RPC
   requests, task updates and report artifacts using A2A SDK 1.2.0.
 - `client.py` demonstrates discovery and a request through the A2A client SDK.
-- `__main__.py` provides the three terminal commands.
+- `__main__.py` provides research, serve, ask and index-books commands.
 
 This is search-based research, not a licensed live market feed. A source can be
 stale, unavailable or paywalled even with live web access enabled. The agent is

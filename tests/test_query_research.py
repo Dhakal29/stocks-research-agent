@@ -14,6 +14,17 @@ from nepse_agent.client import ask_agent_report
 from nepse_agent.server import create_app
 
 
+@pytest.fixture(autouse=True)
+def isolate_local_book_retrieval(monkeypatch):
+    # Provider transport tests must not download models or depend on local PDFs.
+    from types import SimpleNamespace
+    monkeypatch.setenv("NEPSE_RAG_WEB_FIRST", "0")
+    monkeypatch.setattr(
+        "nepse_agent.rag_engine.get_rag_store",
+        lambda: SimpleNamespace(retrieve_for_analysis=lambda *args, **kwargs: []),
+    )
+
+
 SOURCES = [
     "https://www.nrb.org.np/monetary-policy/",
     "https://kathmandupost.com/money",
