@@ -13,7 +13,11 @@ st.caption("Ask for today's market summary, company research, comparisons, news,
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-def render_clean_report(markdown_text: str) -> None:
+def render_clean_report(markdown_text: str, elapsed_seconds: float | None = None) -> None:
+    # Display latency badge if available
+    if elapsed_seconds is not None and elapsed_seconds > 0:
+        st.caption(f"⏱️ **Response latency:** {elapsed_seconds:.2f}s")
+
     # Separate the main analysis from raw cited source lists to keep the UI clean
     if "## Cited sources" in markdown_text:
         main_content, sources_content = markdown_text.split("## Cited sources", 1)
@@ -26,7 +30,7 @@ def render_clean_report(markdown_text: str) -> None:
 # Display previous chat messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        render_clean_report(msg["content"])
+        render_clean_report(msg["content"], msg.get("elapsed_seconds"))
 
 # User prompt
 prompt = st.chat_input("Ask a question, e.g. Analyze NABIL based on fundamental books")
@@ -37,6 +41,8 @@ if prompt:
 
     with st.chat_message("assistant"):
         with st.spinner("Analyzing stock fundamentals against training books..."):
+            import time
+            start_ts = time.perf_counter()
             try:
                 # Try calling via A2A Server first
                 try:
@@ -46,8 +52,11 @@ if prompt:
             except (ResearchError, ValueError) as exc:
                 st.error(str(exc))
             else:
+                elapsed = report_data.get("elapsed_seconds") or round(time.perf_counter() - start_ts, 2)
                 response = report_data["markdown"]
-                render_clean_report(response)
+                render_clean_report(response, elapsed)
                 st.session_state.messages.append({
-                    "role": "assistant", "content": response,
+                    "role": "assistant",
+                    "content": response,
+                    "elapsed_seconds": elapsed,
                 })

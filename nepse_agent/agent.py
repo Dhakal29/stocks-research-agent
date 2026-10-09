@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
@@ -183,6 +184,7 @@ class ResearchReport:
     source_domains: list[str] = field(default_factory=list)
     search_queries: list[str] = field(default_factory=list)
     search_suggestions_html: str = ""
+    elapsed_seconds: float = 0.0
 
 
 def validate_query(query: str) -> str:
@@ -558,6 +560,7 @@ class NepseResearchAgent:
 
     async def research(self, query: str) -> ResearchReport:
         query = validate_query(query)
+        start_time = time.perf_counter()
         logger.info("[research] Starting research for query: %r", query)
         researched_at = datetime.now(ZoneInfo("Asia/Kathmandu")).isoformat(timespec="seconds")
         search = self._research_gemini if self.provider == "gemini" else self._research_openai
@@ -578,9 +581,11 @@ class NepseResearchAgent:
                 searched_urls.extend(report.searched_urls)
                 search_queries.extend(report.search_queries)
                 if len(report.source_domains) >= self.min_sites:
+                    elapsed = round(time.perf_counter() - start_time, 2)
                     report = replace(
                         report, searched_urls=list(dict.fromkeys(searched_urls)),
                         search_queries=list(dict.fromkeys(search_queries)),
+                        elapsed_seconds=elapsed,
                     )
                     # Extract and log decision verdict & book reasoning for clear observability
                     verdict_match = re.search(r"(\[(?:INVESTMENT GRADE|MODERATE / FAIR VALUE|AVOID / HIGH RISK|INSUFFICIENT VERIFIED DATA)[^\]]*\])", report.markdown, re.IGNORECASE)
@@ -588,6 +593,7 @@ class NepseResearchAgent:
                     logger.info("================== INVESTMENT ANALYSIS VERDICT ==================")
                     logger.info("Ticker/Query: %r", query)
                     logger.info("Verdict: %s", verdict_label)
+                    logger.info("Total Research Latency: %.2f seconds", elapsed)
                     
                     # Log summary of reasons
                     rationale_section = re.search(r"(###? .*?(?:Investment Verdict|Rationale|Why & How).*?\n)(.*?)(?=\n###?|\Z)", report.markdown, re.DOTALL | re.IGNORECASE)
@@ -597,8 +603,8 @@ class NepseResearchAgent:
                     logger.info("==================================================================")
 
                     logger.info(
-                        "[research] Research completed for query: %r with %d searched URLs and %d search queries.",
-                        query, len(report.searched_urls), len(report.search_queries),
+                        "[research] Research completed for query: %r in %.2fs with %d searched URLs and %d search queries.",
+                        query, elapsed, len(report.searched_urls), len(report.search_queries),
                     )
                     return report
                 reason = f"Search cited {len(report.source_domains)} distinct sites; at least {self.min_sites} are required."
