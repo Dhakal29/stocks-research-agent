@@ -304,6 +304,28 @@ date. A future scheduled event must not be presented as already observed.
 A closure or holiday must be verified before being asserted. These are model
 instructions, not a guarantee that every source has fresh or complete data.
 
+Current ticker reports also fetch an official quote directly from
+[nepalstock.com](https://www.nepalstock.com/). `market_data.py` uses the same
+anonymous public session flow as the exchange's website and resolves the ticker
+against its securities list before fetching the company quote. The company ID,
+symbol, positive finite price, trading date and source timestamp are validated.
+Future or inconsistent dates are rejected. An explicit close value and official
+closed status for the same session are required to call a price a closing price.
+
+The application renders that quote separately and passes it to web research and
+book analysis for valuation. Generated duplicate quote rows and columns are
+removed locally, preserving other facts and citations and allowing the report
+to complete with the official snapshot. Formatting alone does not trigger a
+research retry. Missing search evidence or insufficient cited-site coverage
+still requires a retry.
+An older official quote is labeled with its actual date and an unverified current
+session. Missing times or 52-week bounds stay unavailable. If NEPSE cannot be
+read, the current price stays unavailable rather than falling back to a search
+snippet. The JSON report includes `market_quotes` with the quote or its
+unavailability reason. Historical and news-only requests skip this current
+quote lookup. Install the updated requirements to include the Python `wasmtime`
+runtime for NEPSE's public session helper.
+
 For a full company report:
 
 | Area | Information |
@@ -333,23 +355,28 @@ and [ShareSansar company profile](https://www.sharesansar.com/company/NABIL).
 - `rag_engine.py` manages local PDF extraction, semantic chunks, FastEmbed vectors,
   retrieval, cache freshness and optional OCR. `ocr_books.swift` recognizes
   scanned pages using macOS PDFKit and Vision.
+- `market_data.py` retrieves and validates official NEPSE quotes and renders
+  their dates, freshness, price types and 52-week ranges without model inference.
 - `server.py` exposes the researcher through A2A agent discovery, JSON-RPC
   requests, task updates and report artifacts using A2A SDK 1.2.0.
 - `client.py` demonstrates discovery and a request through the A2A client SDK.
 - `__main__.py` provides research, serve, ask and index-books commands.
 
-This is search-based research, not a licensed live market feed. A source can be
-stale, unavailable or paywalled even with live web access enabled. The agent is
-instructed to report the actual quote date and financial period, flag gaps,
-preserve BS dates, and distinguish dividend percentages from dividend yields.
-Those content rules are model instructions; the application does not validate
-every figure, reporting period or citation-to-claim relationship.
+NEPSE quotes come from the exchange's public website API, which can be delayed
+or unavailable and whose session flow may change. The application validates and
+dates these quotes; it does not promise a licensed live market feed. Other
+financial figures and news still use web research, whose sources can be stale,
+unavailable or paywalled. The agent is instructed to identify financial periods,
+preserve BS dates and distinguish dividend percentages from dividend yields;
+the application does not validate every such figure or citation-to-claim
+relationship.
 
-For reliable numerical data in a larger application, add a `get_stock_snapshot`
-tool backed by a permitted data API/feed, and a `get_financial_statements` tool
-that extracts company filings into validated fields. Keep web search for news
-and discovery, then let the model summarize the collected evidence. A2A handles
-communication with the researcher; these tools handle data retrieval.
+For more structured financial data, add a `get_financial_statements` tool that
+extracts company filings into validated fields alongside the existing official
+quote client. A permitted data feed can provide stronger availability guarantees.
+Keep web search for news and discovery, then let the model summarize the collected
+evidence. A2A handles communication with the researcher; these clients handle
+data retrieval.
 
 API details: [Gemini Google Search grounding](https://ai.google.dev/gemini-api/docs/generate-content/google-search)
 and [OpenAI web search](https://developers.openai.com/api/docs/guides/tools-web-search).

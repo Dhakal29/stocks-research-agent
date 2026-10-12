@@ -7,6 +7,7 @@ Repository: [`stocks-research-agent`](https://github.com/Dhakal29/stocks-researc
 The repository includes:
 - **A2A Server**: Standard JSON-RPC (`SendMessage`) service exposing an `AgentCard` at `/.well-known/agent-card.json`.
 - **NEPSE Research Engine**: Internet search across multiple websites using **Google Gemini** (`gemini-3.5-flash-lite`) or **OpenAI**, with dated market information, fundamentals, news and citations.
+- **Official NEPSE Prices**: Current ticker reports fetch prices directly from nepalstock.com, matching the exchange's company ID and trading date. The application renders the price, last-update time, price type and both 52-week bounds; older sessions and unavailable quotes are labeled explicitly.
 - **Local Book Knowledge Store**: Extracts and indexes PDFs from `training_books/`, then retrieves relevant investment principles for the model's research prompt.
 - **Interactive Chat UI**: Streamlit web chat with conversation history and automated server fallback.
 - **CLI Tools & Client**: Query agents directly, via CLI, or over the network.
@@ -379,7 +380,7 @@ python -m nepse_agent research "NABIL" --json
 The Gemini backend registers `types.Tool(google_search=types.GoogleSearch())`.
 Its returned grounding metadata supplies the actual search queries and source
 citations. The JSON report includes `source_domains`, `search_queries`,
-`cited_sources` and Google Search suggestions for graphical clients.
+`cited_sources`, structured `market_quotes` and Google Search suggestions for graphical clients.
 The model plans searches from the user's question, starts with broad web searches,
 then checks relevant primary sources and other publishers. It is not restricted
 to MeroLagani or a fixed list of sites. Search retrieves relevant accessible
@@ -392,6 +393,15 @@ Stock research defaults to that current date unless you request a historical
 period. The model is instructed to include the date in current quote/news
 searches, show actual quote timestamps and financial reporting periods, and
 label older data when current figures are unavailable.
+For current NEPSE ticker reports, a separate client fetches the exchange's public
+quote data directly from nepalstock.com before web research. Its dated quote is
+used in both research stages and rendered by the application. A search snippet
+cannot replace it. If the official service fails, the current price is marked
+unavailable; an older official session is shown as an older session. Closing
+prices require an explicit close value and matching official market status.
+Historical requests retain their requested period, and news-only questions do
+not trigger a quote lookup. The `wasmtime` dependency runs the anonymous session
+helper supplied by NEPSE; no NEPSE account or Node.js installation is required.
 See [the search-tool and source-coverage guide](nepse_agent/README.md#internet-search-tool-and-source-coverage)
 for configuration and [Google's grounding documentation](https://ai.google.dev/gemini-api/docs/generate-content/google-search)
 for the API contract. Prices retain their source dates; search does not guarantee

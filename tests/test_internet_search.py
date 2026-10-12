@@ -12,6 +12,8 @@ from nepse_agent.agent import EvidenceError, NepseResearchAgent, ResearchError, 
 
 @pytest.fixture(autouse=True)
 def isolate_local_book_retrieval(monkeypatch):
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr("nepse_agent.agent.fetch_market_quotes", AsyncMock(return_value=[]))
     # Provider transport tests must not download models or depend on local PDFs.
     from types import SimpleNamespace
     monkeypatch.setenv("NEPSE_RAG_WEB_FIRST", "0")

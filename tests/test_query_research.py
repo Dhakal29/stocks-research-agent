@@ -14,10 +14,15 @@ import pytest
 from nepse_agent.agent import NepseResearchAgent
 from nepse_agent.client import ask_agent_report
 from nepse_agent.server import create_app
+from nepse_agent.market_data import (
+    QuoteError, QuoteResult, fetch_market_quotes, parse_quote, quote_markdown, requested_symbols,
+)
 
 
 @pytest.fixture(autouse=True)
 def isolate_local_book_retrieval(monkeypatch):
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr("nepse_agent.agent.fetch_market_quotes", AsyncMock(return_value=[]))
     # Provider transport tests must not download models or depend on local PDFs.
     from types import SimpleNamespace
     monkeypatch.setenv("NEPSE_RAG_WEB_FIRST", "0")
@@ -349,3 +354,332 @@ def test_market_summary_over_a2a_has_query_provenance_and_market_skill():
             assert report["search_queries"] == [query]
 
     asyncio.run(scenario())
+
+
+OFFICIAL_CUTOFF = "2026-10-12T16:00:00+05:45"
+
+
+def official_quote_data():
+    # Synthetic provider data in the exchange's verified public response format.
+    return {
+        "securityData": {"id": 2831, "symbol": "UNHPL", "securityName": "Union Hydropower Limited"},
+        "securityMcsData": {
+            "securityId": "2831", "lastTradedPrice": 352.9, "closePrice": 352.9,
+            "businessDate": "2026-10-12", "lastUpdatedDateTime": "2026-10-12T14:59:58.324608",
+            "fiftyTwoWeekLow": 337, "fiftyTwoWeekHigh": 571,
+        },
+    }
+
+
+def official_market():
+    return {"isOpen": "CLOSE", "asOf": "2026-10-12T15:00:00", "id": 80}
+
+
+def official_transport(calls, *, quote_data=None, fail=False):
+    from wasmtime import wat2wasm
+    # Real WASM execution verifies both salt argument ordering and token slicing.
+    functions = " ".join(
+        f'(func (export "{name}") (param i32 i32 i32 i32 i32) (result i32) local.get {index})'
+        for index, name in enumerate(("cdx", "rdx", "bdx", "ndx", "mdx"))
+    )
+    helper = bytes(wat2wasm("(module " + functions + ")"))
+
+    def respond(request):
+        calls.append(request)
+        assert request.url.host == "www.nepalstock.com"
+        assert request.method == "GET"
+        assert "x-goog-api-key" not in request.headers
+        if request.url.path == "/api/authenticate/prove":
+            assert request.url.params["_"]
+            assert "Authorization" not in request.headers
+            if fail:
+                return httpx.Response(503, text="private-session-body")
+            return httpx.Response(200, json={
+                "accessToken": "a0b1c2d3e4f", "salt1": 1, "salt2": 3, "salt3": 7, "salt4": 5, "salt5": 9,
+            })
+        if request.url.path == "/assets/prod/css.wasm":
+            return httpx.Response(200, content=helper)
+        assert request.headers["Authorization"] == "Salter abcdef"
+        if request.url.path == "/api/nots/security":
+            assert request.url.params["nonDelisted"] == "true"
+            return httpx.Response(200, json=[{"id": 2831, "symbol": "UNHPL"}])
+        if request.url.path == "/api/nots/nepse-data/market-open":
+            return httpx.Response(200, json=official_market())
+        assert request.url.path == "/api/nots/security/2831"
+        return httpx.Response(200, json=quote_data if quote_data is not None else official_quote_data())
+
+    return httpx.MockTransport(respond)
+
+
+@pytest.mark.parametrize("provider", ["gemini", "openai"])
+@pytest.mark.parametrize("web_first", [False, True])
+def test_official_october_12_quote_survives_search_and_analysis(provider, web_first, research_clock, monkeypatch):
+    monkeypatch.setenv("NEPSE_RAG_WEB_FIRST", "1" if web_first else "0")
+    monkeypatch.setattr("nepse_agent.agent.fetch_market_quotes", fetch_market_quotes)
+    research_clock.current = datetime.fromisoformat(OFFICIAL_CUTOFF)
+    official_calls, prompts = [], []
+
+    def respond(request):
+        user_input, instructions = request_content(provider, request, search=not prompts)
+        assert user_input == "UNHPL"
+        assert '"price": 352.9' in instructions
+        assert '"business_date": "2026-10-12"' in instructions
+        assert "never replace them with an older search snippet" in instructions
+        assert "a0b1c2d3e4f" not in instructions
+        prompts.append(instructions)
+        if len(prompts) == 1:
+            return httpx.Response(200, json=response_for(provider, "UNHPL", "Verified company fundamentals."))
+        return httpx.Response(200, json=analysis_response_for(provider, "Company assessment [WEB:1] [WEB:2]."))
+
+    agent = NepseResearchAgent(
+        "fixture-key", "fixture-model", httpx.MockTransport(respond), provider=provider,
+        market_transport=official_transport(official_calls),
+    )
+    report = asyncio.run(agent.research("UNHPL"))
+    assert len(prompts) == (2 if web_first else 1)
+    assert sum(call.url.path == "/api/authenticate/prove" for call in official_calls) == 1
+    assert sum(call.url.path == "/api/nots/security/2831" for call in official_calls) == 1
+    assert report.markdown.count("## Official NEPSE market quote") == 1
+    assert "| Current market price | NPR 352.90 |" in report.markdown
+    assert "| Quote date | 2026-10-12 |" in report.markdown
+    assert "| 14:59:58 |" in report.markdown
+    assert "| Price type | Closing price |" in report.markdown
+    assert "NPR 337.00 – NPR 571.00" in report.markdown
+    assert "NPR 354.00" not in report.markdown
+    assert report.market_quotes[0]["quote"]["price"] == 352.9
+    assert report.market_quotes[0]["quote"]["freshness"] == "current_date"
+    assert "nepalstock.com" in report.source_domains
+    assert any(source.url.endswith("/company/detail/2831") for source in report.cited_sources)
+
+
+@pytest.mark.parametrize("provider", ["gemini", "openai"])
+@pytest.mark.parametrize("missing_search_first", [False, True])
+def test_stale_generated_price_is_normalized_without_a_research_retry(provider, missing_search_first, research_clock, monkeypatch):
+    monkeypatch.setattr("nepse_agent.agent.fetch_market_quotes", fetch_market_quotes)
+    research_clock.current = datetime.fromisoformat(OFFICIAL_CUTOFF)
+    official_calls, prompts = [], []
+
+    def respond(request):
+        user_input, instructions = request_content(provider, request)
+        prompts.append(instructions)
+        text = (
+            "**Current Market Price:** NPR 354.00\nQuote Date: October 8, 2026\nTimestamp: Time unavailable\n\n"
+            "Verified company fundamentals; valuation uses the supplied official quote."
+        )
+        data = response_for(provider, user_input, text)
+        if missing_search_first and len(prompts) == 1:
+            if provider == "gemini":
+                data["candidates"][0]["groundingMetadata"] = {}
+            else:
+                data["output"][0]["status"] = "failed"
+        return httpx.Response(200, json=data)
+
+    agent = NepseResearchAgent(
+        "fixture-key", "fixture-model", httpx.MockTransport(respond), provider=provider,
+        market_transport=official_transport(official_calls),
+    )
+    report = asyncio.run(agent.research("UNHPL"))
+    assert "NPR 352.90" in report.markdown
+    assert "354.00" not in report.markdown
+    assert "October 8" not in report.markdown
+    assert "Verified company fundamentals" in report.markdown
+    assert report.markdown.count("| Current market price |") == 1
+    assert len(prompts) == (2 if missing_search_first else 1)
+    if missing_search_first:
+        assert "previous response failed evidence validation" in prompts[1]
+    assert sum(call.url.path == "/api/nots/security/2831" for call in official_calls) == 1
+
+
+def test_unavailable_exchange_does_not_promote_a_search_price(research_clock, monkeypatch):
+    monkeypatch.setattr("nepse_agent.agent.fetch_market_quotes", fetch_market_quotes)
+    research_clock.current = datetime.fromisoformat(OFFICIAL_CUTOFF)
+    calls = []
+
+    def respond(request):
+        user_input, instructions = request_content("openai", request)
+        assert '"quote": null' in instructions
+        assert "do not supply a current price from another site" in instructions
+        return httpx.Response(200, json=response_for("openai", user_input, "Current valuation cannot be verified."))
+
+    agent = NepseResearchAgent(
+        "fixture-key", "fixture-model", httpx.MockTransport(respond),
+        market_transport=official_transport(calls, fail=True),
+    )
+    report = asyncio.run(agent.research("UNHPL"))
+    assert "UNHPL current market price: unavailable" in report.markdown
+    assert report.market_quotes[0]["quote"] is None
+    assert "nepalstock.com" not in report.source_domains
+    assert "private-session-body" not in report.markdown
+
+
+def test_old_official_quote_is_labeled_and_not_assumed_to_be_closing():
+    data = official_quote_data()
+    data["securityMcsData"].update(
+        businessDate="2026-10-08", lastUpdatedDateTime="2026-10-08T14:59:00", lastTradedPrice=354, closePrice=354,
+    )
+    quote = parse_quote(data, "UNHPL", 2831, official_market(), OFFICIAL_CUTOFF)
+    markdown = quote_markdown([QuoteResult("UNHPL", quote)])
+    assert quote.freshness == "older_session"
+    assert "Closing" not in quote.price_type
+    assert "Latest available price (older session)" in markdown
+    assert "current-session price unverified" in markdown
+    assert "| Current market price |" not in markdown
+    assert "2026-10-08" in markdown
+
+
+def test_missing_quote_time_and_partial_range_remain_explicit():
+    data = official_quote_data()
+    data["securityMcsData"].update(lastUpdatedDateTime=None, fiftyTwoWeekLow=340.1, fiftyTwoWeekHigh=None)
+    quote = parse_quote(data, "UNHPL", 2831, {}, OFFICIAL_CUTOFF)
+    markdown = quote_markdown([QuoteResult("UNHPL", quote)])
+    assert quote.last_updated_at is None
+    assert "Time unavailable" in markdown
+    assert "NPR 340.10 – unavailable" in markdown
+    assert "Closing" not in quote.price_type
+    assert "16:00:00" not in markdown
+
+
+def test_market_open_does_not_turn_a_populated_close_field_into_closing_price():
+    market = {**official_market(), "isOpen": "OPEN"}
+    quote = parse_quote(official_quote_data(), "UNHPL", 2831, market, OFFICIAL_CUTOFF)
+    assert quote.price_type.startswith("Intraday last traded price")
+
+
+@pytest.mark.parametrize("field,value,hint", [
+    ("lastTradedPrice", None, "valid last traded price"),
+    ("lastTradedPrice", float("nan"), "valid last traded price"),
+    ("lastTradedPrice", -354, "valid last traded price"),
+    ("lastTradedPrice", True, "valid last traded price"),
+    ("businessDate", None, "valid trading date"),
+    ("businessDate", "2026-10-13", "after the research cutoff"),
+    ("lastUpdatedDateTime", "2026-10-12T17:00:00", "after the research cutoff"),
+    ("lastUpdatedDateTime", "2026-10-11T14:00:00", "disagree"),
+    ("lastUpdatedDateTime", "not a timestamp", "invalid quote timestamp"),
+    ("securityId", "2769", "does not match"),
+])
+def test_invalid_exchange_prices_and_dates_are_rejected(field, value, hint):
+    data = official_quote_data()
+    data["securityMcsData"][field] = value
+    with pytest.raises(QuoteError, match=hint):
+        parse_quote(data, "UNHPL", 2831, official_market(), OFFICIAL_CUTOFF)
+
+
+def test_company_id_cannot_substitute_another_hydropower_company():
+    data = official_quote_data()
+    data["securityData"]["symbol"] = "NHDL"
+    with pytest.raises(QuoteError, match="does not match"):
+        parse_quote(data, "UNHPL", 2831, official_market(), OFFICIAL_CUTOFF)
+
+
+@pytest.mark.parametrize("query,symbols", [
+    ("unhpl", ["UNHPL"]),
+    ("Analyze UNHPL", ["UNHPL"]),
+    ("analyze unhpl", ["UNHPL"]),
+    ("unhpl price", ["UNHPL"]),
+    ("Compare UNHPL and NABIL", ["UNHPL", "NABIL"]),
+    ("Research UNHPL as of 2024-01-15", []),
+    ("Analyze UNHPL in 2024", []),
+    ("UNHPL price as of 2026-10-12", ["UNHPL"]),
+    ("UNHPL price on October 12, 2026", ["UNHPL"]),
+    ("UNHPL price on October 8, 2026", []),
+    ("Tell us the UNHPL price", ["UNHPL"]),
+    ("UNHPL on 2026-10-08", []),
+    ("UNHPL yesterday", []),
+    ("Latest UNHPL news", []),
+    ("Give me today's market summary", []),
+    ("How do interest rates affect share prices?", []),
+    ("Give me today's US market summary", []),
+])
+def test_official_quote_lookup_preserves_query_scope(query, symbols):
+    assert requested_symbols(query, OFFICIAL_CUTOFF) == symbols
+
+
+def test_historical_request_makes_no_current_quote_http_calls():
+    def must_not_call(request):
+        pytest.fail("A historical request must not fetch a current quote")
+    results = asyncio.run(fetch_market_quotes(
+        "Analyze UNHPL as of 2024-01-15", OFFICIAL_CUTOFF, transport=httpx.MockTransport(must_not_call),
+    ))
+    assert results == []
+
+
+@pytest.mark.parametrize("field", [
+    "**Current Market Price:** NPR 354.00", "Current Price: NPR 354.00", "Price: NPR 354.00",
+    "| Market Price (NPR) | 354.00 |", "Quote Date: October 8, 2026", "52-Week Range: NPR 340.10",
+])
+def test_generated_quote_field_variants_cannot_override_application_data(field):
+    from nepse_agent.agent import _normalize_provider_quote_fields
+    normalized = _normalize_provider_quote_fields(field + "\n\nVerified company fundamentals.")
+    assert normalized == "Verified company fundamentals."
+
+
+@pytest.mark.parametrize("provider", ["gemini", "openai"])
+@pytest.mark.parametrize("price", ["352.90", "354.00"])
+def test_repeated_quote_fields_in_synthesis_do_not_restart_any_stage(provider, price, research_clock, monkeypatch):
+    monkeypatch.setenv("NEPSE_RAG_WEB_FIRST", "1")
+    monkeypatch.setattr("nepse_agent.agent.fetch_market_quotes", fetch_market_quotes)
+    research_clock.current = datetime.fromisoformat(OFFICIAL_CUTOFF)
+    official_calls, prompts = [], []
+
+    def respond(request):
+        user_input, instructions = request_content(provider, request, search=not prompts)
+        prompts.append(instructions)
+        if len(prompts) == 1:
+            return httpx.Response(200, json=response_for(provider, user_input, "Verified company fundamentals."))
+        return httpx.Response(200, json=analysis_response_for(provider,
+            f"| Field | Value |\n| --- | --- |\n| Current Market Price | NPR {price} |\n"
+            "| Quote Date | October 8, 2026 |\n| Sector | Hydropower [WEB:1] |\n\n"
+            "Company assessment [WEB:1] [WEB:2]."
+        ))
+
+    agent = NepseResearchAgent(
+        "fixture-key", "fixture-model", httpx.MockTransport(respond), provider=provider,
+        market_transport=official_transport(official_calls),
+    )
+    report = asyncio.run(agent.research("unhpl"))
+    assert len(prompts) == 2
+    assert sum(call.url.path == "/api/nots/security/2831" for call in official_calls) == 1
+    assert report.markdown.count("| Current market price | NPR 352.90 |") == 1
+    assert "354.00" not in report.markdown
+    assert "October 8" not in report.markdown
+    assert "Hydropower" in report.markdown
+    assert "Company assessment" in report.markdown
+
+
+@pytest.mark.parametrize("markdown,expected", [
+    (
+        "| Field | Value |\n| --- | --- |\n| Current Market Price | NPR 354 |\n"
+        "| EPS | 1.80 [WEB:1] |\n| 52-week range | 340.10 – unavailable |",
+        "| Field | Value |\n| --- | --- |\n| EPS | 1.80 [WEB:1] |",
+    ),
+    (
+        "| Symbol | Price (NPR) | EPS | Quote date |\n| --- | --- | --- | --- |\n"
+        "| UNHPL | 354 | 1.80 [WEB:1] | 2026-10-08 |",
+        "| Symbol | EPS |\n| --- | --- |\n| UNHPL | 1.80 [WEB:1] |",
+    ),
+    (
+        "### Current Market Price\nNPR 354.00\n\n### Fundamentals\nEPS 1.80 [WEB:1].",
+        "### Fundamentals\nEPS 1.80 [WEB:1].",
+    ),
+    (
+        "- **Current Market Price:**\n  NPR 354.00\n- **EPS:** 1.80 [WEB:1]",
+        "- **EPS:** 1.80 [WEB:1]",
+    ),
+])
+def test_quote_normalization_preserves_fundamentals_and_citations(markdown, expected):
+    from nepse_agent.agent import _normalize_provider_quote_fields
+    assert _normalize_provider_quote_fields(markdown) == expected
+
+
+def test_removed_quote_citations_do_not_inflate_source_coverage():
+    from nepse_agent.agent import Source, _attach_official_quotes, _build_report, _source_link
+    old = Source("Old quote", SOURCES[0], "nrb.org.np")
+    facts = Source("Company facts", SOURCES[1], "kathmandupost.com")
+    evidence = _build_report("unhpl", OFFICIAL_CUTOFF, "fixture", [
+        f"Current Market Price: NPR 354.00 {_source_link(old)}\n\nCompany evidence {_source_link(facts)}"
+    ], {old.url: old, facts.url: facts}, [old.url, facts.url], ["unhpl"])
+    quote = parse_quote(official_quote_data(), "UNHPL", 2831, official_market(), OFFICIAL_CUTOFF)
+    report = _attach_official_quotes(evidence, [QuoteResult("UNHPL", quote)])
+    assert report.source_domains == ["kathmandupost.com", "nepalstock.com"]
+    assert old.url not in {source.url for source in report.cited_sources}
+    assert old.url in report.searched_urls
