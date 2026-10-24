@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from .trend_analysis import evaluate_stock_trend
+
 logger = logging.getLogger(__name__)
 NEPSE_BASE_URL = "https://www.nepalstock.com"
 NEPAL_TIMEZONE = ZoneInfo("Asia/Kathmandu")
@@ -284,6 +286,12 @@ def quote_markdown(results: list[QuoteResult]) -> str:
         low = f"NPR {quote.fifty_two_week_low:,.2f}" if quote.fifty_two_week_low is not None else "unavailable"
         high = f"NPR {quote.fifty_two_week_high:,.2f}" if quote.fifty_two_week_high is not None else "unavailable"
         freshness = "Quote dated today" if quote.freshness == "current_date" else "Older session; current-session price unverified"
+        trend_res = evaluate_stock_trend(
+            current_price=quote.price,
+            fifty_two_week_low=quote.fifty_two_week_low,
+            fifty_two_week_high=quote.fifty_two_week_high,
+        )
+        pos_52w = trend_res.indicators.get("52w_position_percentile", "N/A")
         sections.append(
             f"**{quote.symbol} — {quote.company_name}**\n\n"
             "| Field | Official NEPSE data |\n| --- | --- |\n"
@@ -292,6 +300,9 @@ def quote_markdown(results: list[QuoteResult]) -> str:
             f"| Source last update (Asia/Kathmandu, UTC+05:45) | {updated} |\n"
             f"| Price type | {quote.price_type} |\n"
             f"| 52-week range | {low} – {high} |\n"
+            f"| 52-week position | {pos_52w} from annual low |\n"
+            f"| Technical trend (Chukul model) | **{trend_res.trend}** ({trend_res.score}/{trend_res.max_score}) |\n"
+            f"| Trend summary | {trend_res.summary} |\n"
             f"| Freshness | {freshness} |\n"
             f"| Source | [Nepal Stock Exchange]({quote.source_url}) |"
         )
