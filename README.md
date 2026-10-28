@@ -9,7 +9,8 @@ The repository includes:
 - **NEPSE Research Engine**: Internet search across multiple websites using **Google Gemini** (`gemini-3.5-flash-lite`) or **OpenAI**, with dated market information, fundamentals, news and citations.
 - **Official NEPSE Prices**: Current ticker reports fetch prices directly from nepalstock.com, matching the exchange's company ID and trading date. The application renders the price, last-update time, price type and both 52-week bounds; older sessions and unavailable quotes are labeled explicitly.
 - **Local Book Knowledge Store**: Extracts and indexes PDFs from `training_books/`, then retrieves relevant investment principles for the model's research prompt.
-- **Interactive Chat UI**: Streamlit web chat with conversation history and automated server fallback.
+- **Financial Benchmarking**: One-click sidebar panel that searches the web for the latest financial statements and produces a clean comparative table of revenue growth, gross margin, R&D spend, and cash conversion cycle for a company and its sector peers.
+- **Interactive Chat UI**: Streamlit web chat with conversation history, benchmarking sidebar, and automated server fallback.
 - **CLI Tools & Client**: Query agents directly, via CLI, or over the network.
 
 ---
@@ -33,6 +34,11 @@ flowchart TD
     Prompt --> Model[Gemini or OpenAI synthesis from supplied evidence]
     Model --> Report[Financial scorecard, assessment and references]
     Report --> Interface
+
+    Interface -->|Benchmark button| BM[BenchmarkingAgent]
+    BM --> BMSearch[Web search — latest financial statements]
+    BMSearch --> BMTable[Comparative table: revenue growth, gross margin, R&D, CCC]
+    BMTable --> Interface
 ```
 
 For a bare stock symbol or an analysis/investment question, web research runs
@@ -49,6 +55,15 @@ request instead. The CLI and A2A server use the same research engine.
 - **Standard A2A Protocol**: Fully compliant `AgentCard` metadata, task state lifecycle (`TASK_STATE_WORKING` -> `TASK_STATE_COMPLETED`), and structured report artifacts.
 - **Semantic Book Retrieval**: Groups sentences by shifts in embedding similarity, then searches local FastEmbed vectors in persistent Chroma using cosine similarity. Passages retain their book filename, detected chapter and exact PDF page.
 - **Financial Scorecard and Investment Assessment**: Full company reports request Pass / Caution / Fail assessments of profitability, leverage, cash flow and valuation. The prompt separates business quality from valuation and uses only supplied book references.
+- **Financial Benchmarking**: A dedicated **📊 Run Benchmarking** button in the Streamlit sidebar searches the internet for the most recent annual/quarterly financial statements and renders a clean comparative Markdown table with these four metrics for the company and 2–4 sector peers:
+  | Metric | Description |
+  |---|---|
+  | Revenue Growth (YoY %) | Year-over-year top-line growth from the latest filing |
+  | Gross Margin (%) | Gross profit as a percentage of revenue |
+  | R&D Spend (% of revenue) | Research and development expense relative to revenue |
+  | Cash Conversion Cycle (days) | DSO + DIO − DPO; components reported when full CCC is unavailable |
+
+  The company field auto-populates from the most recently researched ticker in chat. Results are cached in session state and can be cleared with a single button. All figures carry inline citations to their source filings. This feature reuses the same Gemini/OpenAI provider and API key as the main research engine — no extra setup is required.
 - **Persistent Local Index**: Caches passage metadata in `.rag_index.json`, vectors in `.rag_vectors/`, and the pretrained model in `.embedding_models/`. Changed PDFs, embedding models or chunking settings trigger reindexing; legacy TF-IDF indexes migrate automatically.
 - **Retrieval Logs and Book Sources**: Logs show the web response used for retrieval, exact vector query strings, cosine scores, rejected matches and passages passed to the model. JSON reports expose these supplied passages in `book_sources`; unknown book citation IDs are rejected.
 - **Optional Local OCR**: A Python indexing option uses macOS Vision and Swift to recognize text in scanned PDF pages. Extraction status and skipped-page warnings help identify books missing from the index.
@@ -58,7 +73,7 @@ request instead. The CLI and A2A server use the same research engine.
 - **Temporary Gemini Error Recovery**: Retries temporary HTTP 429 and 500/502/503/504 failures twice with exponential backoff and jitter, within a shared 180-second generation deadline per stage. Honors provider wait hints up to 60 seconds per retry; longer waits and daily/zero quotas receive specific guidance. Logs show attempts and delays.
 - **Readable Reports and Research Logs**: The Streamlit UI places the web source list in an expandable section. Terminal logs show indexing, search progress, source coverage and the investment verdict when detected.
 - **Multiple Interfaces**:
-  - Interactive Web Chat UI (Streamlit)
+  - Interactive Web Chat UI (Streamlit) with Financial Benchmarking sidebar
   - HTTP JSON-RPC Server
   - CLI Direct Research (`python -m nepse_agent research`)
   - Inter-Agent Python Client (`nepse_agent.client.ask_agent`)
@@ -325,6 +340,19 @@ Unspecified market questions default to NEPSE; name another market explicitly
 to research it. The answer follows the question's topic, timeframe, language
 and requested level of detail.
 
+#### 📊 Financial Benchmarking (Sidebar)
+
+The Streamlit UI includes a **Benchmarking** panel in the left sidebar. Click **📊 Run Benchmarking** to search the internet for the latest financial statements of any company and its sector peers and display a structured comparative table:
+
+| Company (Period) | Revenue Growth YoY (%) | Gross Margin (%) | R&D Spend (% rev) | CCC (days) |
+|---|---|---|---|---|
+
+- The company field auto-populates from the most recent ticker you researched in chat.
+- You can type any company name or ticker manually (e.g. `NABIL`, `AAPL`, `Reliance`).
+- Results are cached in the session and remain visible until you click **🗑️ Clear benchmark**.
+- Each figure includes an inline citation link to its source filing.
+- No additional API keys are required — benchmarking reuses the same `GEMINI_API_KEY` or `OPENAI_API_KEY`.
+
 ---
 
 ### Option 2: Running as an A2A Server (For Multi-Agent Systems)
@@ -424,11 +452,12 @@ python -m pytest -q -p no:cacheprovider tests
 .
 ├── .env                       # API keys (git-ignored)
 ├── requirements.txt           # Production dependencies
-├── chat_ui.py                 # Streamlit chat interface
+├── chat_ui.py                 # Streamlit chat interface with benchmarking sidebar
 ├── training_books/            # Local PDF books and RAG cache (git-ignored)
 │
 ├── nepse_agent/               # Research engine and A2A integration
 │   ├── agent.py               # Book-context injection, web search, citations & synthesis
+│   ├── benchmarking.py        # Financial benchmarking agent (revenue growth, margins, R&D, CCC)
 │   ├── rag_engine.py          # Semantic chunking, local embeddings & Chroma search
 │   ├── ocr_books.swift        # Optional macOS OCR for scanned PDF pages
 │   ├── server.py              # A2A AgentCard & JSON-RPC server routes
